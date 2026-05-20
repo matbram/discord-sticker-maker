@@ -1,5 +1,9 @@
 import { logger, setRequestId } from './logger.js'
 
+// Same-origin by default (Railway all-in-one). Set VITE_API_BASE at build time
+// to point a separately-hosted frontend (e.g. Vercel) at the backend on Railway.
+export const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
+
 // Kick off processing. `source` is { file } or { url }. Returns { job_id, request_id }.
 export async function startProcess(source, params) {
   const form = new FormData()
@@ -7,7 +11,7 @@ export async function startProcess(source, params) {
   if (source.file) form.append('file', source.file)
   else if (source.url) form.append('url', source.url)
 
-  const res = await fetch('/api/process', { method: 'POST', body: form })
+  const res = await fetch(`${API_BASE}/api/process`, { method: 'POST', body: form })
   const data = await res.json().catch(() => ({}))
   if (data.request_id) setRequestId(data.request_id)
   if (!res.ok) {
@@ -21,7 +25,7 @@ export async function startProcess(source, params) {
 
 // Subscribe to SSE progress. Calls onEvent(evt) for each event. Returns a close fn.
 export function subscribeEvents(jobId, onEvent) {
-  const es = new EventSource(`/api/events/${jobId}`)
+  const es = new EventSource(`${API_BASE}/api/events/${jobId}`)
   let finished = false
   let errors = 0
   es.onmessage = (e) => {
@@ -47,5 +51,5 @@ export function subscribeEvents(jobId, onEvent) {
 
 export function resultUrl(jobId, { download = false } = {}) {
   const q = download ? '?download=1' : `?t=${Date.now()}`
-  return `/api/result/${jobId}${q}`
+  return `${API_BASE}/api/result/${jobId}${q}`
 }

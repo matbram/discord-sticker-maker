@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -45,6 +46,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Discord Sticker Maker", lifespan=lifespan)
+
+# Allow a separately-hosted frontend (e.g. on Vercel) to call this API. No
+# cookies/auth are used, so a wildcard origin is safe; restrict via env if wanted.
+_cors_origins = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins or ["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
+)
 
 
 @app.middleware("http")
