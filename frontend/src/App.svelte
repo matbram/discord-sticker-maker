@@ -293,7 +293,14 @@
 
       <!-- per-output results -->
       <div class="outputs">
-        {#if busy}<div class="updating">Updating…</div>{/if}
+        {#if busy}
+          <div class="working-strip" aria-live="polite">
+            <span class="dot-spin" aria-hidden="true"></span>
+            <span class="ws-text">{stageText}</span>
+            {#if overallPct != null}<span class="ws-pct">{overallPct}%</span>{/if}
+            <div class="ws-bar" class:indeterminate={overallPct == null}><div class="ws-fill" style={overallPct != null ? `width:${overallPct}%` : ''}></div></div>
+          </div>
+        {/if}
         {#each TYPES as t}
           {#if selected[t.id]}
             {@const o = getOut(t.id)}
@@ -415,7 +422,13 @@
   .seg button.on { background: var(--accent); color: #fff; }
 
   .outputs { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; position: relative; }
-  .updating { position: absolute; top: -28px; right: 0; color: var(--accent); font-size: 13px; font-weight: 600; }
+  .working-strip { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius); padding: 10px 14px; }
+  .dot-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent); animation: spin 0.8s linear infinite; flex: none; }
+  .ws-text { color: var(--text); font-size: 13px; font-weight: 600; }
+  .ws-pct { color: var(--accent); font-size: 13px; font-weight: 700; margin-left: auto; }
+  .ws-bar { flex-basis: 100%; height: 6px; background: var(--bg-elevated); border-radius: 999px; overflow: hidden; }
+  .ws-fill { height: 100%; background: linear-gradient(90deg, #5865f2, #8b5cf6); border-radius: 999px; transition: width 0.25s ease; }
+  .ws-bar.indeterminate .ws-fill { width: 35%; animation: slide 1.1s ease-in-out infinite; }
   .out-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
   .out-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .out-head .t-emoji { font-size: 18px; }
