@@ -158,51 +158,78 @@ def _assemble_apng(frame_pngs: list[bytes], delays) -> bytes:
     return anim.to_bytes()
 
 
+LADDER_WORKERS = min(2, os.cpu_count() or 1)  # bounded for memory on small hosts
+
+
+def _run_parallel(funcs):
+    if len(funcs) == 1:
+        return [funcs[0]()]
+    with ThreadPoolExecutor(max_workers=LADDER_WORKERS) as ex:
+        return list(ex.map(lambda fn: fn(), funcs))
+
+
+def _rgba_apng(frames, delays):
+    return _assemble_apng(_parallel_rgba_pngs(frames), delays)
+
+
+def _palette_apng(frames, delays, colors):
+    pngs = _palette_frame_pngs(frames, colors)
+    return _assemble_apng(pngs, delays) if pngs is not None else None
+
+
 def _write_frames(frames, td) -> None:
     for i, arr in enumerate(frames):
         Image.fromarray(arr, "RGBA").save(os.path.join(td, f"f{i:05d}.png"), "PNG")
 
 
+def _gif_render(td, fps_v, colors):
+    """Run palettegen+paletteuse against frames already written in `td`."""
+    pattern = os.path.join(td, "f%05d.png")
+    pal = os.path.join(td, f"pal{colors}.png")
+    out = os.path.join(td, f"o{colors}.gif")
+    fr_arg = f"{fps_v:.3f}"
+    r1 = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-framerate", fr_arg,
+                         "-i", pattern, "-vf", f"palettegen=max_colors={colors}:reserve_transparent=1", pal],
+                        capture_output=True)
+    if r1.returncode != 0:
+        log.warning("gif.palettegen_failed", stderr=r1.stderr.decode("utf-8", "replace")[:200]); return None
+    r2 = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-framerate", fr_arg,
+                         "-i", pattern, "-i", pal, "-lavfi", "paletteuse=alpha_threshold=128", "-loop", "0", out],
+                        capture_output=True)
+    if r2.returncode != 0 or not os.path.exists(out):
+        log.warning("gif.paletteuse_failed", stderr=r2.stderr.decode("utf-8", "replace")[:200]); return None
+    with open(out, "rb") as fh:
+        data = fh.read()
+    log.info("gif.attempt", colors=colors, fps=round(fps_v, 2), bytes=len(data))
+    return data
+
+
 def encode_gif(frames, delays, *, budget, max_colors=256, fps_cap=24) -> tuple[bytes, str, int, float | None]:
-    """GIF via ffmpeg palettegen/paletteuse (1-bit alpha). Reduce colors then frames
-    to fit the byte budget. ffmpeg is fast for GIF, so a small ladder is fine."""
+    """GIF via ffmpeg palettegen/paletteuse (1-bit alpha). Frames are written once;
+    the colour levels are tried in parallel and we keep the highest that fits."""
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is required for GIF encoding")
     mean_ms = (sum(delays) / len(delays)) if delays else 100.0
     base_fps = min(fps_cap, max(1.0, 1000.0 / mean_ms))
     color_steps = [c for c in (256, 128, 64, 32) if c <= max_colors] or [max(2, min(max_colors, 256))]
-    best: tuple[bytes, int, float] | None = None
 
-    def attempt(fr, fps_v, colors):
-        nonlocal best
-        with tempfile.TemporaryDirectory() as td:
+    def run_set(fr, fps_v):
+        td = tempfile.mkdtemp()
+        try:
             _write_frames(fr, td)
-            pattern = os.path.join(td, "f%05d.png")
-            pal = os.path.join(td, "pal.png")
-            out = os.path.join(td, "o.gif")
-            fr_arg = f"{fps_v:.3f}"
-            r1 = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-framerate", fr_arg,
-                                 "-i", pattern, "-vf", f"palettegen=max_colors={colors}:reserve_transparent=1", pal],
-                                capture_output=True)
-            if r1.returncode != 0:
-                log.warning("gif.palettegen_failed", stderr=r1.stderr.decode("utf-8", "replace")[:300]); return None
-            r2 = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-framerate", fr_arg,
-                                 "-i", pattern, "-i", pal, "-lavfi", "paletteuse=alpha_threshold=128", "-loop", "0", out],
-                                capture_output=True)
-            if r2.returncode != 0 or not os.path.exists(out):
-                log.warning("gif.paletteuse_failed", stderr=r2.stderr.decode("utf-8", "replace")[:300]); return None
-            with open(out, "rb") as fh:
-                data = fh.read()
-            log.info("gif.attempt", frames=len(fr), fps=round(fps_v, 2), colors=colors, bytes=len(data))
-            if best is None or len(data) < len(best[0]):
-                best = (data, len(fr), fps_v)
-            return data
+            res = _run_parallel([(lambda c=c: _gif_render(td, fps_v, c)) for c in color_steps])
+            return list(zip(color_steps, res))
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
 
-    for colors in color_steps:
-        data = attempt(frames, base_fps, colors)
-        if data is not None and len(data) <= budget:
-            return data, "GIF", len(frames), round(base_fps, 2)
+    full = run_set(frames, base_fps)
+    fits = [(c, d) for c, d in full if d is not None and len(d) <= budget]
+    if fits:
+        c, d = max(fits, key=lambda x: x[0])
+        return d, "GIF", len(frames), round(base_fps, 2)
 
+    best = min((d for _, d in full if d), key=len, default=None)
+    best_n = len(frames)
     n = len(frames)
     for divisor in (2, 3, 4):
         target = max(6, n // divisor)
@@ -210,13 +237,25 @@ def encode_gif(frames, delays, *, budget, max_colors=256, fps_cap=24) -> tuple[b
             continue
         f2, d2 = even_subsample(frames, delays, target)
         fps2 = min(fps_cap, max(1.0, 1000.0 / ((sum(d2) / len(d2)) or 100.0)))
-        data = attempt(f2, fps2, color_steps[-1])
-        if data is not None and len(data) <= budget:
-            return data, "GIF", len(f2), round(fps2, 2)
+        d = _gif_render_once(f2, fps2, color_steps[-1])
+        if d is not None and len(d) <= budget:
+            return d, "GIF", len(f2), round(fps2, 2)
+        if d is not None and (best is None or len(d) < len(best)):
+            best, best_n = d, len(f2)
 
-    assert best is not None
-    log.warning("gif.over_budget", bytes=len(best[0]), budget=budget)
-    return best[0], "GIF", best[1], round(best[2], 2)
+    if best is None:
+        raise RuntimeError("gif encode produced nothing")
+    log.warning("gif.over_budget", bytes=len(best), budget=budget)
+    return best, "GIF", best_n, round(base_fps, 2)
+
+
+def _gif_render_once(fr, fps_v, colors):
+    td = tempfile.mkdtemp()
+    try:
+        _write_frames(fr, td)
+        return _gif_render(td, fps_v, colors)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
 
 
 def encode_static(arr: np.ndarray, params) -> tuple[bytes, str]:
@@ -237,83 +276,58 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
     have_pq = _pngquant_available()
     priority = getattr(params, "priority", "balanced")
     priority = priority.value if hasattr(priority, "value") else priority
-    best: tuple[bytes, int, list] | None = None
-
-    def consider(data, nf, de):
-        nonlocal best
-        if best is None or len(data) < len(best[0]):
-            best = (data, nf, de)
-
-    def attempt(mode, fr, de, colors=None):
-        pngs = _parallel_rgba_pngs(fr) if mode == "rgba" else _palette_frame_pngs(fr, colors)
-        if pngs is None:
-            return None
-        data = _assemble_apng(pngs, de)
-        log.info("encode.attempt", mode=mode, colors=colors, frames=len(fr), bytes=len(data), priority=priority)
-        consider(data, len(fr), de)
-        return data
 
     def done(data, fr, de):
         return data, "APNG", len(fr), _avg_fps(de)
 
-    # 1. Lossless RGBA at full frames — best quality if it happens to fit.
-    data = attempt("rgba", frames, delays)
-    if data is not None and len(data) <= budget:
-        return done(data, frames, delays)
-
+    # No pngquant: only lever is frame count (rgba).
     if not have_pq:
-        # No pngquant: only lever is dropping frames (RGBA).
-        for divisor in (2, 3, 4):
-            target = max(8, len(frames) // divisor)
-            if target >= len(frames):
-                continue
-            f2, d2 = even_subsample(frames, delays, target)
-            data = attempt("rgba", f2, d2)
-            if data is not None and len(data) <= budget:
+        best = None
+        for div in (1, 2, 3, 4):
+            f2, d2 = (frames, delays) if div == 1 else even_subsample(frames, delays, max(8, len(frames) // div))
+            data = _rgba_apng(f2, d2)
+            if best is None or len(data) < len(best[0]):
+                best = (data, f2, d2)
+            if len(data) <= budget:
                 return done(data, f2, d2)
-        assert best is not None
-        log.warning("encode.over_budget", bytes=len(best[0]), budget=budget)
-        return best[0], "APNG", best[1], _avg_fps(best[2])
+        return done(best[0], best[1], best[2])
 
-    # Palette ladder, bounded above by the user's max_colors and below by the
-    # priority's color floor. Fewer colors -> smaller frames -> more frames fit.
-    # Lower colors -> smaller frames -> more frames fit. "smooth" goes aggressive
-    # (down to 8) so users who want max frames get them.
     floor = {"smooth": 8, "balanced": 32, "sharp": 64}.get(priority, 32)
-    # Coarse ladder keeps the number of (re)assembly passes small for speed.
-    ladder = [c for c in (128, 64, 32, 16, 8) if floor <= c <= params.max_colors]
-    if not ladder:
-        ladder = [max(16, min(params.max_colors, 64))]
+    ladder = [c for c in (128, 64, 32, 16, 8) if floor <= c <= params.max_colors] or [max(8, min(params.max_colors, 64))]
 
-    if priority == "sharp":
-        # Color-first: keep colors high, drop frames to fit.
-        data = attempt("pal", frames, delays, ladder[0])
-        if data is not None and len(data) <= budget:
-            return done(data, frames, delays)
-        per_frame = len(best[0]) / max(len(best[2]), 1)
-        target = max(8, int(budget / per_frame * 0.9))
-        if target < len(frames):
-            f2, d2 = even_subsample(frames, delays, target)
-            for colors in ladder:
-                data = attempt("pal", f2, d2, colors)
-                if data is not None and len(data) <= budget:
-                    return done(data, f2, d2)
-    else:
-        # Frame-first (smooth / balanced): keep ALL frames, lower colors until it
-        # fits — this maximizes smoothness, which is what most people want.
-        for colors in ladder:
-            data = attempt("pal", frames, delays, colors)
-            if data is not None and len(data) <= budget:
-                return done(data, frames, delays)
-        # Even the fewest colors at full frames won't fit — drop frames at the floor.
-        per_frame = len(best[0]) / max(len(best[2]), 1)
-        target = max(8, int(budget / per_frame * 0.9))
-        if target < len(frames):
-            f2, d2 = even_subsample(frames, delays, target)
-            data = attempt("pal", f2, d2, ladder[-1])
-            if data is not None and len(data) <= budget:
-                return done(data, f2, d2)
+    # One probe at the floor color, full frames, tells us how big things are.
+    probe = _palette_apng(frames, delays, floor)
+    if probe is None:
+        return done(_rgba_apng(frames, delays), frames, delays)
+    log.info("encode.probe", colors=floor, frames=len(frames), bytes=len(probe), priority=priority)
+    BIG = 1_000_000  # rgba sentinel for "max quality"
 
-    assert best is not None
-    log.warning("encode.over_budget", bytes=len(best[0]), budget=budget)
-    return best[0], "APNG", best[1], _avg_fps(best[2])
+    if len(probe) <= budget and priority != "sharp":
+        # Full frames fit -> spend headroom on quality (more colors / rgba), in parallel.
+        cand = [(BIG, lambda: _rgba_apng(frames, delays))] + \
+               [(c, (lambda c=c: _palette_apng(frames, delays, c))) for c in ladder if c > floor]
+        res = _run_parallel([fn for _, fn in cand])
+        scored = [(q, d) for (q, _), d in zip(cand, res) if d is not None and len(d) <= budget]
+        if scored:
+            return done(max(scored, key=lambda x: x[0])[1], frames, delays)
+        return done(probe, frames, delays)
+
+    # Too big at full frames (or sharp): pick a frame count from the probe, then try
+    # colors at that count in parallel and keep the highest that fits.
+    per = len(probe) / max(len(frames), 1)
+    target = min(len(frames), max(8, int(budget / per * 0.9))) if len(probe) > budget else len(frames)
+    f2, d2 = even_subsample(frames, delays, target)
+    res = _run_parallel([(lambda c=c: _palette_apng(f2, d2, c)) for c in ladder])
+    for c, d in zip(ladder, res):
+        log.info("encode.attempt", colors=c, frames=len(f2), bytes=(len(d) if d else -1), priority=priority)
+    scored = [(c, d) for c, d in zip(ladder, res) if d is not None and len(d) <= budget]
+    if scored:
+        return done(max(scored, key=lambda x: x[0])[1], f2, d2)
+
+    # Still over -> halve frames at the floor color.
+    f3, d3 = even_subsample(frames, delays, max(6, target // 2))
+    d = _palette_apng(f3, d3, floor)
+    if d is not None:
+        log.warning("encode.over_budget", bytes=len(d), budget=budget, frames=len(f3))
+        return done(d, f3, d3)
+    return done(probe, frames, delays)

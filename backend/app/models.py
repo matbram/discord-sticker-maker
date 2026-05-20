@@ -59,8 +59,10 @@ GIF_PROFILES = {
 
 def profile_for(output_type: str, gif_quality: str = "balanced") -> dict:
     if output_type == "sticker":
+        # 320x320 under 512KB rarely fits >~25 frames, so a lower cap avoids
+        # encoding frames we'd only trim away (big speedup, same output).
         return {"square": True, "size": 320, "animated_format": "APNG", "static_format": "PNG",
-                "budget": TARGET_BYTES, "hard_limit": DISCORD_MAX_BYTES, "frame_cap": 72}
+                "budget": TARGET_BYTES, "hard_limit": DISCORD_MAX_BYTES, "frame_cap": 48}
     if output_type == "emoji":
         return {"square": True, "size": 128, "animated_format": "GIF", "static_format": "PNG",
                 "budget": 256 * 1024, "hard_limit": 256 * 1024, "frame_cap": 48}
