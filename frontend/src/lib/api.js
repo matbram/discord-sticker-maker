@@ -1,22 +1,36 @@
 import { logger, setRequestId } from './logger.js'
 
-// Kick off processing. `source` is { file } or { url }. Returns { job_id, request_id }.
-export async function startProcess(source, params) {
-  const form = new FormData()
-  form.append('params', JSON.stringify(params))
-  if (source.file) form.append('file', source.file)
-  else if (source.url) form.append('url', source.url)
+// Kick off processing. `source` is { file } or { url }. `onUpload(fraction)` reports
+// upload progress (0..1). Returns { job_id, request_id }.
+export function startProcess(source, params, onUpload) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData()
+    form.append('params', JSON.stringify(params))
+    if (source.file) form.append('file', source.file)
+    else if (source.url) form.append('url', source.url)
 
-  const res = await fetch('/api/process', { method: 'POST', body: form })
-  const data = await res.json().catch(() => ({}))
-  if (data.request_id) setRequestId(data.request_id)
-  if (!res.ok) {
-    const err = new Error(data.error || 'Failed to start processing')
-    err.requestId = data.request_id
-    throw err
-  }
-  logger.event('process.started', { job_id: data.job_id })
-  return data
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', '/api/process')
+    if (xhr.upload && onUpload) {
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onUpload(e.loaded / e.total) }
+      xhr.upload.onload = () => onUpload(1)
+    }
+    xhr.onload = () => {
+      let data = {}
+      try { data = JSON.parse(xhr.responseText) } catch (_) { /* ignore */ }
+      if (data.request_id) setRequestId(data.request_id)
+      if (xhr.status >= 200 && xhr.status < 300) {
+        logger.event('process.started', { job_id: data.job_id })
+        resolve(data)
+      } else {
+        const err = new Error(data.error || 'Failed to start processing')
+        err.requestId = data.request_id
+        reject(err)
+      }
+    }
+    xhr.onerror = () => reject(new Error('Network error during upload'))
+    xhr.send(form)
+  })
 }
 
 // Subscribe to SSE progress. Calls onEvent(evt) for each event. Returns a close fn.
@@ -33,8 +47,6 @@ export function subscribeEvents(jobId, onEvent) {
   }
   es.onerror = () => {
     if (finished) { es.close(); return }
-    // The browser auto-reconnects on transient drops; only give up after a few
-    // failures (e.g. the server restarted/OOM'd and the job is gone).
     errors += 1
     if (errors >= 3) {
       es.close()
@@ -45,7 +57,9 @@ export function subscribeEvents(jobId, onEvent) {
   return () => { finished = true; es.close() }
 }
 
-export function resultUrl(jobId, { download = false } = {}) {
-  const q = download ? '?download=1' : `?t=${Date.now()}`
-  return `/api/result/${jobId}${q}`
+// type: '' (back-compat first output), a type ("sticker"|"emoji"|"gif"), or "all" (zip).
+export function resultUrl(jobId, { type = '', download = false, ver = '' } = {}) {
+  const path = type ? `/api/result/${jobId}/${type}` : `/api/result/${jobId}`
+  const q = download ? '?download=1' : `?v=${ver || jobId}`
+  return `${path}${q}`
 }
