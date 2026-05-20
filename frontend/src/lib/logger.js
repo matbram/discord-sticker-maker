@@ -1,6 +1,5 @@
 // Client logging: console + fire-and-forget POST /log so client and server
 // traces join up via the backend request_id.
-const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
 let lastRequestId = null
 
 export function setRequestId(id) {
@@ -21,13 +20,11 @@ function send(level, message, extra = {}) {
   })
   try {
     if (navigator.sendBeacon) {
-      // text/plain keeps it a CORS-simple request (no preflight) cross-origin;
-      // the server parses the JSON body regardless of content-type.
-      navigator.sendBeacon(`${API_BASE}/log`, new Blob([body], { type: 'text/plain;charset=UTF-8' }))
+      navigator.sendBeacon('/log', new Blob([body], { type: 'application/json' }))
       return
     }
   } catch (_) { /* fall through */ }
-  fetch(`${API_BASE}/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {})
+  fetch('/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {})
 }
 
 export const logger = {
