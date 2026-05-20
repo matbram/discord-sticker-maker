@@ -216,9 +216,11 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
 
     # Palette ladder, bounded above by the user's max_colors and below by the
     # priority's color floor. Fewer colors -> smaller frames -> more frames fit.
-    floor = {"smooth": 16, "balanced": 32, "sharp": 64}.get(priority, 32)
+    # Lower colors -> smaller frames -> more frames fit. "smooth" goes aggressive
+    # (down to 8) so users who want max frames get them.
+    floor = {"smooth": 8, "balanced": 32, "sharp": 64}.get(priority, 32)
     # Coarse ladder keeps the number of (re)assembly passes small for speed.
-    ladder = [c for c in (128, 64, 32, 16) if floor <= c <= params.max_colors]
+    ladder = [c for c in (128, 64, 32, 16, 8) if floor <= c <= params.max_colors]
     if not ladder:
         ladder = [max(16, min(params.max_colors, 64))]
 

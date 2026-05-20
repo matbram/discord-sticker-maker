@@ -289,7 +289,7 @@
 
         {#if choppy}
           <div class="fixes">
-            <button class="chip-btn" on:click={() => applyPreset(PRESETS[1])}>Make it smoother</button>
+            <button class="chip-btn" on:click={() => applyPreset(PRESETS[1])}>Add more frames</button>
             <button class="chip-btn" on:click={shortenClip}>Shorten the clip</button>
           </div>
         {/if}
@@ -335,13 +335,13 @@
 
         {#if animated}
           <div class="card-sm">
-            <h3>Smoothness</h3>
+            <h3>Frames vs colors{meta.frames ? ` — ${meta.frames} frames now` : ''}</h3>
             <div class="seg three">
-              <button class:on={params.priority === 'smooth'} on:click={() => setPriority('smooth')}>Smoother</button>
+              <button class:on={params.priority === 'smooth'} on:click={() => setPriority('smooth')}>More frames</button>
               <button class:on={params.priority === 'balanced'} on:click={() => setPriority('balanced')}>Balanced</button>
-              <button class:on={params.priority === 'sharp'} on:click={() => setPriority('sharp')}>Crisper</button>
+              <button class:on={params.priority === 'sharp'} on:click={() => setPriority('sharp')}>Richer colors</button>
             </div>
-            <p class="muted-line">Smoother keeps more frames; Crisper keeps richer colors.</p>
+            <p class="muted-line">A 320×320 sticker must fit in 512 KB. <b>More frames</b> spends the budget on extra frames (fewer colors); <b>Richer colors</b> keeps colors but fewer frames.</p>
           </div>
         {/if}
 
@@ -368,10 +368,13 @@
               </select></label>
             <label class="row"><span>Padding</span><input type="range" min="0" max="0.4" step="0.01" bind:value={params.padding} on:change={scheduleRegen} /></label>
             {#if animated}
-              <label class="row"><span>Max FPS {params.max_fps}</span><input type="range" min="5" max="60" step="1" bind:value={params.max_fps} on:change={scheduleRegen} /></label>
+              <label class="row"><span>Max colors {params.max_colors}</span><input type="range" min="8" max="256" step="8" bind:value={params.max_colors} on:change={scheduleRegen} /></label>
+              <div class="est">Fewer colors = more frames fit under 512 KB.</div>
+            {/if}
+            {#if sourceIsVideo}
+              <label class="row"><span>Sample FPS {params.max_fps}</span><input type="range" min="5" max="60" step="1" bind:value={params.max_fps} on:change={scheduleRegen} /></label>
               <label class="row"><span>Duration {params.max_duration_s}s</span><input type="range" min="0.5" max="10" step="0.5" bind:value={params.max_duration_s} on:change={scheduleRegen} /></label>
-              <label class="row"><span>Max colors {params.max_colors}</span><input type="range" min="16" max="256" step="16" bind:value={params.max_colors} on:change={scheduleRegen} /></label>
-              <div class="est">≈ {estFrames} frames target (capped at 72)</div>
+              <div class="est">≈ {estFrames} frames sampled (then trimmed to fit)</div>
             {/if}
           </div>
         </details>
