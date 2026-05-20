@@ -19,7 +19,7 @@
       offset_x: 0.0,
       offset_y: 0.0,
       padding: 0.06,
-      max_fps: 24,
+      max_fps: 18,
       max_duration_s: 4.0,
       trim_start_s: 0.0,
       max_bytes: 512000,

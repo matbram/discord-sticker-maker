@@ -5,20 +5,28 @@ so we cannot give frames independent palettes. Two valid strategies:
   * RGBA  - true-color + full alpha (best quality); shrink via frame/fps cuts.
   * palette - quantize ALL frames against ONE shared palette via a vertical
     strip through pngquant (8-bit with per-index alpha), then split + assemble.
-We escalate from best quality toward smaller until we fit ``max_bytes``.
+
+Performance: frames are capped/even-subsampled before we get here, per-frame PNG
+compression is parallelized, and we pick the next reduction step from the measured
+size instead of brute-forcing every combination.
 """
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from PIL import Image
 
+from ..models import MAX_ANIM_FRAMES
 from ..observability import get_logger
 
 log = get_logger("encode")
+
+WORKERS = min(4, os.cpu_count() or 1)
 
 
 def _pngquant_available() -> bool:
@@ -40,13 +48,18 @@ def _pngquant(png_bytes: bytes, colors: int) -> bytes | None:
     return None
 
 
-def _apply_skip(frames, delays, skip):
-    if skip <= 1:
+def even_subsample(frames, delays, max_n):
+    """Keep <= max_n frames spread evenly across the timeline, preserving total duration."""
+    n = len(frames)
+    if n <= max_n:
         return frames, delays
+    bounds = [round(k * n / max_n) for k in range(max_n + 1)]
     nf, nd = [], []
-    for i in range(0, len(frames), skip):
-        nf.append(frames[i])
-        nd.append(int(sum(delays[i : i + skip])) or 1)
+    for k in range(max_n):
+        a = bounds[k]
+        b = min(max(bounds[k] + 1, bounds[k + 1]), n)
+        nf.append(frames[a])
+        nd.append(max(1, int(sum(delays[a:b]))))
     return nf, nd
 
 
@@ -57,13 +70,17 @@ def _avg_fps(delays) -> float | None:
     return round(1000.0 / mean_ms, 2) if mean_ms > 0 else None
 
 
-def _rgba_frame_pngs(frames) -> list[bytes]:
-    out = []
-    for f in frames:
-        buf = io.BytesIO()
-        Image.fromarray(f, "RGBA").save(buf, "PNG", optimize=True)
-        out.append(buf.getvalue())
-    return out
+def _rgba_png(arr) -> bytes:
+    buf = io.BytesIO()
+    Image.fromarray(arr, "RGBA").save(buf, "PNG", compress_level=6)
+    return buf.getvalue()
+
+
+def _parallel_rgba_pngs(frames) -> list[bytes]:
+    if len(frames) == 1:
+        return [_rgba_png(frames[0])]
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        return list(pool.map(_rgba_png, frames))
 
 
 def _palette_frame_pngs(frames, colors) -> list[bytes] | None:
@@ -71,7 +88,7 @@ def _palette_frame_pngs(frames, colors) -> list[bytes] | None:
     h, w = frames[0].shape[:2]
     strip = np.concatenate(frames, axis=0)  # (h*n, w, 4)
     buf = io.BytesIO()
-    Image.fromarray(strip, "RGBA").save(buf, "PNG")
+    Image.fromarray(strip, "RGBA").save(buf, "PNG", compress_level=1)  # pngquant re-reads pixels
     quantized = _pngquant(buf.getvalue(), colors)
     if not quantized:
         return None
@@ -113,32 +130,58 @@ def encode_static(arr: np.ndarray, params) -> tuple[bytes, str]:
 
 
 def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | None]:
+    frames, delays = even_subsample(frames, delays, MAX_ANIM_FRAMES)
+    budget = params.max_bytes
     have_pq = _pngquant_available()
-
-    plans: list[tuple[str, int, int | None]] = [("rgba", 1, None), ("rgba", 2, None)]
-    if have_pq:
-        plans += [
-            ("pal", 1, 128), ("pal", 1, 64), ("rgba", 3, None),
-            ("pal", 2, 64), ("pal", 2, 32), ("rgba", 4, None), ("pal", 3, 32),
-        ]
-    else:
-        plans += [("rgba", 3, None), ("rgba", 4, None), ("rgba", 6, None)]
-
     best: tuple[bytes, int, list] | None = None
-    for mode, skip, colors in plans:
-        fr, de = _apply_skip(frames, delays, skip)
-        if len(fr) < 1:
-            continue
-        frame_pngs = _rgba_frame_pngs(fr) if mode == "rgba" else _palette_frame_pngs(fr, colors)
-        if frame_pngs is None:
-            continue
-        data = _assemble_apng(frame_pngs, de)
-        log.info("encode.attempt", mode=mode, skip=skip, colors=colors, frames=len(fr), bytes=len(data))
+
+    def consider(data, nf, de):
+        nonlocal best
         if best is None or len(data) < len(best[0]):
-            best = (data, len(fr), de)
-        if len(data) <= params.max_bytes:
-            return data, "APNG", len(fr), _avg_fps(de)
+            best = (data, nf, de)
+
+    def attempt(mode, fr, de, colors=None):
+        pngs = _parallel_rgba_pngs(fr) if mode == "rgba" else _palette_frame_pngs(fr, colors)
+        if pngs is None:
+            return None
+        data = _assemble_apng(pngs, de)
+        log.info("encode.attempt", mode=mode, colors=colors, frames=len(fr), bytes=len(data))
+        consider(data, len(fr), de)
+        return data
+
+    # 1. Best quality: full-frame RGBA.
+    data = attempt("rgba", frames, delays)
+    if data is not None and len(data) <= budget:
+        return data, "APNG", len(frames), _avg_fps(delays)
+
+    if have_pq:
+        # 2. Shared-palette (full alpha, ~3-4x smaller) at full frames.
+        data = attempt("pal", frames, delays, 64)
+        if data is not None and len(data) <= budget:
+            return data, "APNG", len(frames), _avg_fps(delays)
+
+        # 3. Estimate the frame budget from the measured per-frame size, then re-try.
+        per_frame = len(best[0]) / max(len(best[2]), 1)
+        target = max(8, int(budget / per_frame * 0.9))
+        if target < len(frames):
+            f2, d2 = even_subsample(frames, delays, target)
+            data = attempt("pal", f2, d2, 64)
+            if data is not None and len(data) <= budget:
+                return data, "APNG", len(f2), _avg_fps(d2)
+            data = attempt("pal", f2, d2, 32)  # 4. last resort: fewer colors
+            if data is not None and len(data) <= budget:
+                return data, "APNG", len(f2), _avg_fps(d2)
+    else:
+        # No pngquant: reduce frames (RGBA only).
+        for divisor in (2, 3, 4):
+            target = max(8, len(frames) // divisor)
+            if target >= len(frames):
+                continue
+            f2, d2 = even_subsample(frames, delays, target)
+            data = attempt("rgba", f2, d2)
+            if data is not None and len(data) <= budget:
+                return data, "APNG", len(f2), _avg_fps(d2)
 
     assert best is not None
-    log.warning("encode.over_budget", bytes=len(best[0]), budget=params.max_bytes)
+    log.warning("encode.over_budget", bytes=len(best[0]), budget=budget)
     return best[0], "APNG", best[1], _avg_fps(best[2])

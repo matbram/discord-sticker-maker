@@ -7,8 +7,6 @@ inputs are matted in parallel since ONNX Runtime releases the GIL during inferen
 from __future__ import annotations
 
 import importlib.util
-import os
-from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 import numpy as np
@@ -60,9 +58,13 @@ def _looks_like_illustration(arr: np.ndarray) -> bool:
 def pick_model(requested: str, frames: list[np.ndarray]) -> str:
     if requested and requested != "auto":
         return requested
-    if frames and _looks_like_illustration(frames[0]):
-        return ANIME_MODEL
-    return DEFAULT_MODEL
+    illustration = bool(frames) and _looks_like_illustration(frames[0])
+    if len(frames) > 1:
+        # Animated: favor speed. Anime art still benefits from isnet-anime;
+        # everything else uses the fast u2net (birefnet is too slow per-frame).
+        return ANIME_MODEL if illustration else "u2net"
+    # Single still: one inference, so use the highest-quality model.
+    return ANIME_MODEL if illustration else DEFAULT_MODEL
 
 
 def warmup(models: list[str] | None = None) -> None:
@@ -81,31 +83,17 @@ def remove_bg(
     frames: list[np.ndarray],
     model: str,
     progress: Callable[[int], None] | None = None,
-    max_workers: int | None = None,
 ) -> list[np.ndarray]:
+    """Matte frames serially. ONNX Runtime already parallelizes a single
+    inference across all cores, so running frames serially avoids the CPU
+    oversubscription (and memory blow-up) of N concurrent inferences."""
     _, remove = _load()
     session = _session(model)
-    done = 0
 
-    def run(item):
-        idx, arr = item
+    results: list[np.ndarray] = []
+    for i, arr in enumerate(frames):
         out = remove(Image.fromarray(arr, "RGBA"), session=session)
-        return idx, np.asarray(out.convert("RGBA"), dtype=np.uint8)
-
-    results: list[np.ndarray | None] = [None] * len(frames)
-    workers = max_workers or min(4, os.cpu_count() or 1)
-
-    if len(frames) == 1:
-        _, res = run((0, frames[0]))
-        results[0] = res
+        results.append(np.asarray(out.convert("RGBA"), dtype=np.uint8))
         if progress:
-            progress(1)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for idx, res in pool.map(run, list(enumerate(frames))):
-                results[idx] = res
-                done += 1
-                if progress:
-                    progress(done)
-
-    return [r for r in results if r is not None]
+            progress(i + 1)
+    return results

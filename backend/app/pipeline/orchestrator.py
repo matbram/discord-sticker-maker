@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ..models import STICKER_SIZE, StickerMeta
+from ..models import MAX_ANIM_FRAMES, STICKER_SIZE, StickerMeta
 from ..observability import get_logger, stage
 from . import bg_removal, crop_fit, decode, encode, validate
 from .ingest import Source
@@ -18,6 +18,12 @@ def process(source: Source, params, emit: EmitFn) -> tuple[bytes, str, StickerMe
     with stage("decode", kind=source.kind, mime=source.mime):
         emit("decode", "Reading & decoding input")
         frames = decode.decode(source, params)
+        # Cap frames before the expensive stages so bg removal, crop and encode
+        # all do proportionally less work.
+        if frames.animated and len(frames.frames) > MAX_ANIM_FRAMES:
+            frames.frames, frames.delays_ms = encode.even_subsample(
+                frames.frames, frames.delays_ms, MAX_ANIM_FRAMES
+            )
         emit("decode", f"Decoded {len(frames.frames)} frame(s)", done=len(frames.frames), total=len(frames.frames))
 
     has_alpha = False

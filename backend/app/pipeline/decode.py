@@ -24,13 +24,14 @@ try:
 except Exception:  # noqa: BLE001
     _HEIF = False
 
+from ..models import MAX_ANIM_FRAMES
 from ..observability import get_logger
 from .ingest import IngestError, InputKind, Source
 
 log = get_logger("decode")
 
 DEFAULT_FRAME_DELAY_MS = 100
-MAX_FRAMES = 240  # safety cap; encode stage trims further for size
+MAX_FRAMES = 80  # safety cap; orchestrator subsamples to MAX_ANIM_FRAMES
 
 
 @dataclass
@@ -71,13 +72,17 @@ def _decode_video(data: bytes, max_fps: int, max_duration_s: float, trim_start_s
         inp = os.path.join(td, "input")
         with open(inp, "wb") as fh:
             fh.write(data)
+        # Sample at an fps that lands ~MAX_ANIM_FRAMES across the clip rather than
+        # extracting hundreds of frames we'd only throw away. Covers the full
+        # duration evenly and keeps every downstream stage cheap.
+        eff_fps = min(max_fps, max(1.0, MAX_ANIM_FRAMES / max_duration_s))
         pattern = os.path.join(td, "f_%05d.png")
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-ss", str(trim_start_s),
             "-t", str(max_duration_s),
             "-i", inp,
-            "-vf", f"fps={max_fps}",
+            "-vf", f"fps={eff_fps:.3f}",
             "-frames:v", str(MAX_FRAMES),
             pattern,
         ]
@@ -91,9 +96,9 @@ def _decode_video(data: bytes, max_fps: int, max_duration_s: float, trim_start_s
         if not files:
             raise IngestError("No frames extracted from video")
         frames = [np.asarray(Image.open(f).convert("RGBA"), dtype=np.uint8) for f in files]
-        delay = int(round(1000 / max_fps))
-        log.info("decode.video", frames=len(frames), fps=max_fps)
-        return Frames(frames=frames, delays_ms=[delay] * len(frames), animated=len(frames) > 1, src_fps=max_fps)
+        delay = int(round(1000 / eff_fps))
+        log.info("decode.video", frames=len(frames), fps=round(eff_fps, 2))
+        return Frames(frames=frames, delays_ms=[delay] * len(frames), animated=len(frames) > 1, src_fps=eff_fps)
 
 
 def decode(source: Source, params) -> Frames:

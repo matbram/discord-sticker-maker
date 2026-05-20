@@ -8,6 +8,9 @@ from pydantic import BaseModel, Field
 DISCORD_MAX_BYTES = 512 * 1024
 TARGET_BYTES = 500 * 1024
 STICKER_SIZE = 320
+# Hard cap on frames an animated sticker keeps. A 320x320 APNG under 512KB can't
+# hold many frames anyway, so capping early makes every later stage far cheaper.
+MAX_ANIM_FRAMES = 48
 
 
 class BgModel(str, Enum):
@@ -32,7 +35,7 @@ class ProcessParams(BaseModel):
     padding: float = Field(0.06, ge=0.0, le=0.5)  # fraction of subject size
 
     # animation
-    max_fps: int = Field(24, ge=1, le=60)
+    max_fps: int = Field(18, ge=1, le=60)
     max_duration_s: float = Field(4.0, ge=0.1, le=30.0)
     trim_start_s: float = Field(0.0, ge=0.0)
 
