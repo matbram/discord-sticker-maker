@@ -18,6 +18,9 @@ log = get_logger("bg_removal")
 
 DEFAULT_MODEL = "birefnet-general"
 ANIME_MODEL = "isnet-anime"
+# Used when something heavier (birefnet) is requested for multi-frame input:
+# good quality, but far lighter on memory so it won't OOM the container.
+SAFE_ANIM_MODEL = "isnet-general-use"
 
 _sessions: dict[str, object] = {}
 _remove_fn = None
@@ -56,11 +59,15 @@ def _looks_like_illustration(arr: np.ndarray) -> bool:
 
 
 def pick_model(requested: str, frames: list[np.ndarray]) -> str:
+    multi = len(frames) > 1
     if requested and requested != "auto":
+        # birefnet is too memory-heavy to run per-frame on a small instance.
+        if multi and requested.startswith("birefnet"):
+            return SAFE_ANIM_MODEL
         return requested
     illustration = bool(frames) and _looks_like_illustration(frames[0])
-    if len(frames) > 1:
-        # Animated: favor speed. Anime art still benefits from isnet-anime;
+    if multi:
+        # Animated: favor speed/memory. Anime art still benefits from isnet-anime;
         # everything else uses the fast u2net (birefnet is too slow per-frame).
         return ANIME_MODEL if illustration else "u2net"
     # Single still: one inference, so use the highest-quality model.

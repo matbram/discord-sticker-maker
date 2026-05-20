@@ -12,7 +12,7 @@
 
   function defaultParams() {
     return {
-      remove_bg: true,
+      remove_bg: false,
       bg_model: 'auto',
       auto_crop: true,
       zoom: 1.0,
@@ -42,18 +42,41 @@
   let previewBg = 'checker' // checker | dark | light
   let error = { message: '', requestId: '' }
   let closeStream = null
+  let watchdogTimer = null
 
   let fileInput
 
+  // If no progress event arrives for a while (e.g. the server restarted/OOM'd
+  // mid-job), surface an error instead of leaving the old preview up forever.
+  function armWatchdog() {
+    clearTimeout(watchdogTimer)
+    watchdogTimer = setTimeout(() => {
+      if (view === 'processing') {
+        if (closeStream) closeStream()
+        view = 'error'
+        error = { message: 'This is taking longer than expected — the server may have restarted. Please try again.', requestId: '' }
+        logger.error('sticker.watchdog_timeout')
+      }
+    }, 90000)
+  }
+
+  function disarmWatchdog() {
+    clearTimeout(watchdogTimer)
+    watchdogTimer = null
+  }
+
+  // Bumped to v2 so stale prefs (old default had remove_bg on) are discarded.
+  const PARAMS_KEY = 'dsm_params_v2'
+
   onMount(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem('dsm_params') || 'null')
+      const saved = JSON.parse(localStorage.getItem(PARAMS_KEY) || 'null')
       if (saved) params = { ...defaultParams(), ...saved }
     } catch (_) { /* ignore */ }
   })
 
   function persistParams() {
-    try { localStorage.setItem('dsm_params', JSON.stringify(params)) } catch (_) {}
+    try { localStorage.setItem(PARAMS_KEY, JSON.stringify(params)) } catch (_) {}
   }
 
   function fmtBytes(n) {
@@ -91,7 +114,9 @@
       const { job_id } = await startProcess(source, params)
       jobId = job_id
       closeStream = subscribeEvents(job_id, onEvent)
+      armWatchdog()
     } catch (e) {
+      disarmWatchdog()
       view = 'error'
       error = { message: e.message || 'Something went wrong', requestId: e.requestId || '' }
       logger.error('sticker.start_failed', { error: String(e) })
@@ -99,14 +124,17 @@
   }
 
   function onEvent(evt) {
+    armWatchdog() // reset the timeout on any activity
     if (evt.type === 'progress') {
       progress = { stage: evt.stage, message: evt.message, done: evt.done, total: evt.total }
     } else if (evt.type === 'result') {
+      disarmWatchdog()
       meta = evt.meta
       previewSrc = resultUrl(jobId)
       view = 'done'
       logger.event('sticker.done', { bytes: meta.bytes, frames: meta.frames, format: meta.format })
     } else if (evt.type === 'error') {
+      disarmWatchdog()
       view = 'error'
       error = { message: evt.error || 'Processing failed', requestId: evt.request_id || '' }
       logger.error('sticker.failed', { error: evt.error })
@@ -117,6 +145,7 @@
 
   function reset() {
     if (closeStream) closeStream()
+    disarmWatchdog()
     view = 'idle'
     source = null
     sourceName = ''
@@ -162,6 +191,7 @@
   $: stepIndex = STEPS.findIndex((s) => s.key === progress.stage)
   $: pct = progress.total ? Math.round((progress.done / progress.total) * 100) : null
   $: checklist = meta?.checklist || {}
+  $: estFrames = Math.min(48, Math.max(1, Math.round(params.max_fps * params.max_duration_s)))
 </script>
 
 <svelte:window on:dragover={onDragOver} on:dragleave={onDragLeave} on:drop={onDrop} on:paste={onPaste} />
@@ -256,6 +286,11 @@
           <span class="badge">{meta.format}</span>
           {#if meta.animated}<span class="badge">{meta.frames} frames{meta.fps ? ` · ${meta.fps}fps` : ''}</span>{/if}
         </div>
+        {#if meta.notes && meta.notes.length}
+          <ul class="notes">
+            {#each meta.notes as note}<li>{note}</li>{/each}
+          </ul>
+        {/if}
         <button class="primary-btn big" on:click={download}>⬇ Download sticker</button>
       </div>
 
@@ -289,6 +324,7 @@
             <label class="row"><span>Padding</span><input type="range" min="0" max="0.4" step="0.01" bind:value={params.padding} /></label>
             {#if meta.animated || true}
               <div class="grp">Animation</div>
+              <div class="est">≈ {estFrames} frames{estFrames >= 48 ? ' (capped at 48 to fit 512 KB)' : ''}</div>
               <label class="row"><span>Max FPS {params.max_fps}</span><input type="range" min="5" max="60" step="1" bind:value={params.max_fps} /></label>
               <label class="row"><span>Duration {params.max_duration_s}s</span><input type="range" min="0.5" max="10" step="0.5" bind:value={params.max_duration_s} /></label>
               <label class="row"><span>Trim start {params.trim_start_s}s</span><input type="range" min="0" max="10" step="0.5" bind:value={params.trim_start_s} /></label>
@@ -461,6 +497,10 @@
   .advanced[open] summary::before { content: '▾ '; }
   .controls { display: flex; flex-direction: column; gap: 11px; margin: 14px 0; }
   .grp { color: var(--muted-2); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin-top: 6px; }
+  .est { color: var(--muted); font-size: 13px; margin: -2px 0 2px; }
+  .notes { list-style: none; margin: 12px 0 0; padding: 12px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; gap: 6px; }
+  .notes li { color: var(--muted); font-size: 13px; padding-left: 16px; position: relative; }
+  .notes li::before { content: 'ⓘ'; position: absolute; left: 0; color: var(--accent); }
   .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 14px; color: var(--muted); }
   .row span { white-space: nowrap; }
   .row input[type='range'] { flex: 1; max-width: 56%; accent-color: var(--accent); }

@@ -17,6 +17,22 @@ log = get_logger("crop_fit")
 ALPHA_THRESHOLD = 8
 
 
+def downscale_max_side(frames: list[np.ndarray], max_side: int) -> list[np.ndarray]:
+    """Shrink frames so their longest side is <= max_side (no-op if already smaller).
+
+    Applied before background removal to bound peak memory and speed up matting.
+    """
+    h, w = frames[0].shape[:2]
+    if max(h, w) <= max_side:
+        return frames
+    scale = max_side / float(max(h, w))
+    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+    return [
+        np.asarray(Image.fromarray(f, "RGBA").resize((nw, nh), Image.LANCZOS), dtype=np.uint8)
+        for f in frames
+    ]
+
+
 def _alpha_union_bbox(frames: list[np.ndarray]) -> tuple[int, int, int, int]:
     h, w = frames[0].shape[:2]
     union = np.zeros((h, w), dtype=bool)

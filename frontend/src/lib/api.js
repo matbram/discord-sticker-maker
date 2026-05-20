@@ -22,14 +22,27 @@ export async function startProcess(source, params) {
 // Subscribe to SSE progress. Calls onEvent(evt) for each event. Returns a close fn.
 export function subscribeEvents(jobId, onEvent) {
   const es = new EventSource(`/api/events/${jobId}`)
+  let finished = false
+  let errors = 0
   es.onmessage = (e) => {
     let evt
     try { evt = JSON.parse(e.data) } catch (_) { return }
+    errors = 0
     onEvent(evt)
-    if (evt.type === 'result' || evt.type === 'error') es.close()
+    if (evt.type === 'result' || evt.type === 'error') { finished = true; es.close() }
   }
-  es.onerror = () => { /* stream closed by server after final event */ }
-  return () => es.close()
+  es.onerror = () => {
+    if (finished) { es.close(); return }
+    // The browser auto-reconnects on transient drops; only give up after a few
+    // failures (e.g. the server restarted/OOM'd and the job is gone).
+    errors += 1
+    if (errors >= 3) {
+      es.close()
+      logger.error('sse.lost_connection', { jobId })
+      onEvent({ type: 'error', error: 'Lost connection to the server (it may have restarted). Please try again.' })
+    }
+  }
+  return () => { finished = true; es.close() }
 }
 
 export function resultUrl(jobId, { download = false } = {}) {

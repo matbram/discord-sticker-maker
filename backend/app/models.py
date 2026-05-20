@@ -24,7 +24,7 @@ class BgModel(str, Enum):
 class ProcessParams(BaseModel):
     """Everything the pipeline needs. All optional — full-auto defaults."""
 
-    remove_bg: bool = True
+    remove_bg: bool = False
     bg_model: BgModel = BgModel.auto
 
     # crop / fit
@@ -50,7 +50,9 @@ class StickerMeta(BaseModel):
     bytes: int
     frames: int
     fps: Optional[float] = None
+    requested_fps: Optional[float] = None
     animated: bool
     format: str  # "PNG" | "APNG"
     under_limit: bool
     checklist: dict
+    notes: list[str] = Field(default_factory=list)

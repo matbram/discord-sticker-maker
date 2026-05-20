@@ -12,7 +12,7 @@ FROM python:3.11-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     U2NET_HOME=/models \
-    OMP_NUM_THREADS=4 \
+    OMP_NUM_THREADS=2 \
     STATIC_DIR=/app/frontend/dist
 
 # ffmpeg = decode any video/animated; pngquant = APNG color optimization; libheif = HEIC
