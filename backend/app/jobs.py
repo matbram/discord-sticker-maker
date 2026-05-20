@@ -13,11 +13,15 @@ class Job:
     request_id: str
     queue: "asyncio.Queue" = field(default_factory=asyncio.Queue)
     status: str = "pending"  # pending | running | done | error
-    result: Optional[bytes] = None
-    fmt: str = "PNG"
-    meta: Optional[dict] = None
+    # outputs keyed by type ("sticker"|"emoji"|"gif") -> {bytes, fmt, meta}
+    outputs: dict = field(default_factory=dict)
+    order: list = field(default_factory=list)  # output types in request order
     error: Optional[str] = None
     created: float = field(default_factory=time.time)
+
+    @property
+    def first(self):
+        return self.outputs.get(self.order[0]) if self.order else None
 
 
 class JobStore:

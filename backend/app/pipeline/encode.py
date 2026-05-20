@@ -158,6 +158,67 @@ def _assemble_apng(frame_pngs: list[bytes], delays) -> bytes:
     return anim.to_bytes()
 
 
+def _write_frames(frames, td) -> None:
+    for i, arr in enumerate(frames):
+        Image.fromarray(arr, "RGBA").save(os.path.join(td, f"f{i:05d}.png"), "PNG")
+
+
+def encode_gif(frames, delays, *, budget, max_colors=256, fps_cap=24) -> tuple[bytes, str, int, float | None]:
+    """GIF via ffmpeg palettegen/paletteuse (1-bit alpha). Reduce colors then frames
+    to fit the byte budget. ffmpeg is fast for GIF, so a small ladder is fine."""
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg is required for GIF encoding")
+    mean_ms = (sum(delays) / len(delays)) if delays else 100.0
+    base_fps = min(fps_cap, max(1.0, 1000.0 / mean_ms))
+    color_steps = [c for c in (256, 128, 64, 32) if c <= max_colors] or [max(2, min(max_colors, 256))]
+    best: tuple[bytes, int, float] | None = None
+
+    def attempt(fr, fps_v, colors):
+        nonlocal best
+        with tempfile.TemporaryDirectory() as td:
+            _write_frames(fr, td)
+            pattern = os.path.join(td, "f%05d.png")
+            pal = os.path.join(td, "pal.png")
+            out = os.path.join(td, "o.gif")
+            fr_arg = f"{fps_v:.3f}"
+            r1 = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-framerate", fr_arg,
+                                 "-i", pattern, "-vf", f"palettegen=max_colors={colors}:reserve_transparent=1", pal],
+                                capture_output=True)
+            if r1.returncode != 0:
+                log.warning("gif.palettegen_failed", stderr=r1.stderr.decode("utf-8", "replace")[:300]); return None
+            r2 = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-framerate", fr_arg,
+                                 "-i", pattern, "-i", pal, "-lavfi", "paletteuse=alpha_threshold=128", "-loop", "0", out],
+                                capture_output=True)
+            if r2.returncode != 0 or not os.path.exists(out):
+                log.warning("gif.paletteuse_failed", stderr=r2.stderr.decode("utf-8", "replace")[:300]); return None
+            with open(out, "rb") as fh:
+                data = fh.read()
+            log.info("gif.attempt", frames=len(fr), fps=round(fps_v, 2), colors=colors, bytes=len(data))
+            if best is None or len(data) < len(best[0]):
+                best = (data, len(fr), fps_v)
+            return data
+
+    for colors in color_steps:
+        data = attempt(frames, base_fps, colors)
+        if data is not None and len(data) <= budget:
+            return data, "GIF", len(frames), round(base_fps, 2)
+
+    n = len(frames)
+    for divisor in (2, 3, 4):
+        target = max(6, n // divisor)
+        if target >= n:
+            continue
+        f2, d2 = even_subsample(frames, delays, target)
+        fps2 = min(fps_cap, max(1.0, 1000.0 / ((sum(d2) / len(d2)) or 100.0)))
+        data = attempt(f2, fps2, color_steps[-1])
+        if data is not None and len(data) <= budget:
+            return data, "GIF", len(f2), round(fps2, 2)
+
+    assert best is not None
+    log.warning("gif.over_budget", bytes=len(best[0]), budget=budget)
+    return best[0], "GIF", best[1], round(best[2], 2)
+
+
 def encode_static(arr: np.ndarray, params) -> tuple[bytes, str]:
     buf = io.BytesIO()
     Image.fromarray(arr, "RGBA").save(buf, "PNG", optimize=True)

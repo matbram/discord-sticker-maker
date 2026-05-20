@@ -109,9 +109,17 @@ async def process(
     def run() -> None:
         obs.bind_request(request_id)
         try:
-            data, fmt, meta = orchestrator.process(source, parsed, emit)
-            job.result, job.fmt, job.meta, job.status = data, fmt, meta.model_dump(), "done"
-            loop.call_soon_threadsafe(job.queue.put_nowait, {"type": "result", "meta": job.meta})
+            outs = orchestrator.process(source, parsed, emit)
+            for otype, data, fmt, meta in outs:
+                job.outputs[otype] = {"bytes": data, "fmt": fmt, "meta": meta.model_dump()}
+                job.order.append(otype)
+            job.status = "done"
+            event = {
+                "type": "result",
+                "outputs": [{"type": t, "format": job.outputs[t]["fmt"], "meta": job.outputs[t]["meta"]} for t in job.order],
+                "meta": job.first["meta"] if job.first else None,
+            }
+            loop.call_soon_threadsafe(job.queue.put_nowait, event)
         except Exception as exc:  # noqa: BLE001
             job.status, job.error = "error", str(exc)
             log.error("process.failed", error=str(exc), exc_info=True)
@@ -150,15 +158,44 @@ async def events(job_id: str):
     )
 
 
+def _serve(out: dict, download: bool, name: str) -> Response:
+    fmt = out["fmt"]
+    media = "image/gif" if fmt == "GIF" else "image/png"
+    ext = "gif" if fmt == "GIF" else "png"
+    headers = {"Cache-Control": "no-store"}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{name}.{ext}"'
+    return Response(content=out["bytes"], media_type=media, headers=headers)
+
+
 @app.get("/api/result/{job_id}")
 async def result(job_id: str, download: bool = False):
     job = store.get(job_id)
-    if not job or job.result is None:
+    if not job or not job.first:
         return JSONResponse({"error": "Result not ready"}, status_code=404)
-    headers = {"Cache-Control": "no-store"}
-    if download:
-        headers["Content-Disposition"] = 'attachment; filename="my-sticker.png"'
-    return Response(content=job.result, media_type="image/png", headers=headers)
+    return _serve(job.first, download, "my-sticker")
+
+
+@app.get("/api/result/{job_id}/{output}")
+async def result_typed(job_id: str, output: str, download: bool = False):
+    job = store.get(job_id)
+    if not job or not job.order:
+        return JSONResponse({"error": "Result not ready"}, status_code=404)
+    if output == "all":
+        import io as _io
+        import zipfile
+        buf = _io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for t in job.order:
+                o = job.outputs[t]
+                ext = "gif" if o["fmt"] == "GIF" else "png"
+                z.writestr(f"discord-{t}.{ext}", o["bytes"])
+        return Response(content=buf.getvalue(), media_type="application/zip",
+                        headers={"Content-Disposition": 'attachment; filename="discord-media.zip"', "Cache-Control": "no-store"})
+    out = job.outputs.get(output)
+    if not out:
+        return JSONResponse({"error": "Unknown output"}, status_code=404)
+    return _serve(out, download, f"my-{output}")
 
 
 @app.get("/health")
