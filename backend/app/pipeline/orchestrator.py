@@ -11,7 +11,7 @@ import hashlib
 from typing import Callable
 
 from .. import matte_cache
-from ..models import StickerMeta, profile_for
+from ..models import StickerMeta, profile_for, resolve_aspect
 from ..observability import get_logger, stage
 from . import bg_removal, crop_fit, decode, encode, validate
 from .ingest import Source
@@ -114,7 +114,9 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None
             else:
-                fitted = crop_fit.fit_aspect(fr, eff, prof["max_dim"])
+                sh, sw = fr[0].shape[:2]
+                aw, ah = resolve_aspect(spec.aspect, sw, sh)
+                fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, prof["max_dim"])
                 h, w = fitted[0].shape[:2]
                 src_de = de if is_anim else [100]
                 data, fmt, n_frames, fps = encode.encode_gif(

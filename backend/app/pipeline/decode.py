@@ -46,7 +46,34 @@ def _to_rgba(img: Image.Image) -> np.ndarray:
     return np.asarray(img.convert("RGBA"), dtype=np.uint8)
 
 
-def _decode_image(data: bytes) -> Frames:
+def _slice_by_time(frames: list[np.ndarray], delays: list[int],
+                   trim_start_s: float, max_duration_s: float | None) -> tuple[list[np.ndarray], list[int]]:
+    """Keep only the frames whose playback window intersects
+    ``[trim_start, trim_start + max_duration]``; clip the edge delays. This lets
+    animated images (GIF/APNG/WebP) honor the same trim controls as video."""
+    if not frames or max_duration_s is None:
+        return frames, delays
+    start_ms = max(0.0, float(trim_start_s) * 1000.0)
+    end_ms = start_ms + max(0.0, float(max_duration_s)) * 1000.0
+    out_f: list[np.ndarray] = []
+    out_d: list[int] = []
+    t = 0.0
+    for f, d in zip(frames, delays):
+        d = max(1, int(d))
+        seg_start, seg_end = t, t + d
+        if seg_start < end_ms and seg_end > start_ms:
+            clipped = min(seg_end, end_ms) - max(seg_start, start_ms)
+            out_f.append(f)
+            out_d.append(max(1, int(round(clipped))))
+        t = seg_end
+        if t >= end_ms:
+            break
+    if not out_f:  # trim window starts past the clip -> show the last frame
+        return [frames[-1]], [max(1, int(delays[-1]))]
+    return out_f, out_d
+
+
+def _decode_image(data: bytes, max_duration_s: float | None = None, trim_start_s: float = 0.0) -> Frames:
     import io
 
     img = Image.open(io.BytesIO(data))
@@ -63,8 +90,9 @@ def _decode_image(data: bytes) -> Frames:
         delays.append(int(frame.info.get("duration", DEFAULT_FRAME_DELAY_MS)) or DEFAULT_FRAME_DELAY_MS)
         if len(frames) >= MAX_FRAMES:
             break
-    log.info("decode.image_animated", frames=len(frames))
-    return Frames(frames=frames, delays_ms=delays, animated=True)
+    frames, delays = _slice_by_time(frames, delays, trim_start_s, max_duration_s)
+    log.info("decode.image_animated", frames=len(frames), trim_start_s=trim_start_s, max_duration_s=max_duration_s)
+    return Frames(frames=frames, delays_ms=delays, animated=len(frames) > 1)
 
 
 def _decode_video(data: bytes, max_fps: int, max_duration_s: float, trim_start_s: float) -> Frames:
@@ -104,4 +132,4 @@ def _decode_video(data: bytes, max_fps: int, max_duration_s: float, trim_start_s
 def decode(source: Source, params) -> Frames:
     if source.kind == InputKind.VIDEO:
         return _decode_video(source.data, params.max_fps, params.max_duration_s, params.trim_start_s)
-    return _decode_image(source.data)
+    return _decode_image(source.data, params.max_duration_s, params.trim_start_s)

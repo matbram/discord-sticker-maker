@@ -48,6 +48,14 @@ class GifQuality(str, Enum):
     high = "high"
 
 
+class GifAspect(str, Enum):
+    # Shape of the GIF canvas. Sticker/emoji are always square; the GIF can match the
+    # square framing, keep the source's aspect, or be a 16:9 wide crop.
+    square = "square"
+    source = "source"
+    wide = "16:9"
+
+
 # Per-output Discord profiles. Square types resize to (size, size); gif keeps
 # aspect within max_dim. budget = target bytes (hard Discord limit noted too).
 GIF_PROFILES = {
@@ -71,12 +79,24 @@ def profile_for(output_type: str, gif_quality: str = "balanced") -> dict:
             "budget": g["budget"], "hard_limit": g["budget"], "fps_cap": g["fps_cap"], "frame_cap": 96}
 
 
+def resolve_aspect(aspect, src_w: int, src_h: int) -> tuple[int, int]:
+    """Map a GifAspect (or its string value) to a target (w, h) ratio. ``source``
+    uses the source dims so the GIF keeps the input's shape; only the ratio matters."""
+    a = aspect.value if hasattr(aspect, "value") else aspect
+    if a == "square":
+        return (1, 1)
+    if a == "16:9":
+        return (16, 9)
+    return (max(1, int(src_w)), max(1, int(src_h)))
+
+
 class OutputSpec(BaseModel):
     """One requested output. Per-output knobs fall back to ProcessParams defaults."""
     type: OutputType = OutputType.sticker
     priority: Optional[Priority] = None
     max_colors: Optional[int] = Field(None, ge=2, le=256)
     gif_quality: GifQuality = GifQuality.balanced
+    aspect: GifAspect = GifAspect.source  # GIF-only; sticker/emoji ignore it (always square)
 
 
 class ProcessParams(BaseModel):

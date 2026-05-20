@@ -44,9 +44,17 @@ def _alpha_union_bbox(frames: list[np.ndarray]) -> tuple[int, int, int, int]:
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
 
-def fit_square(frames: list[np.ndarray], params, has_alpha: bool, size: int = STICKER_SIZE) -> list[np.ndarray]:
-    """Crop to a square (subject bbox / fit / fill) and resize to size x size."""
+def fit_to_canvas(frames: list[np.ndarray], params, has_alpha: bool,
+                  aspect_w: int = 1, aspect_h: int = 1, long_side: int = STICKER_SIZE) -> list[np.ndarray]:
+    """Crop to a target aspect (subject bbox / fit / fill + zoom/offset), then resize
+    so the longest side == ``long_side``.
+
+    A 1:1 aspect reduces exactly to the old square fit; arbitrary aspects (used for
+    GIFs) share the same fit/fill/zoom/offset/padding logic. Out-of-bounds crops are
+    transparent-padded by Pillow on RGBA.
+    """
     h, w = frames[0].shape[:2]
+    ar = aspect_w / float(aspect_h)
 
     if params.auto_crop and has_alpha:
         x0, y0, x1, y1 = _alpha_union_bbox(frames)
@@ -56,42 +64,28 @@ def fit_square(frames: list[np.ndarray], params, has_alpha: bool, size: int = ST
     fit_mode = getattr(params, "fit_mode", "fit")
     fit_mode = fit_mode.value if hasattr(fit_mode, "value") else fit_mode
     if fit_mode == "fill":
-        base = min(x1 - x0, y1 - y0)
+        # largest rect of aspect `ar` that fits inside the bbox (cover, no padding)
+        cw = min(x1 - x0, (y1 - y0) * ar)
     else:
+        # smallest rect of aspect `ar` that contains the padded bbox (contain)
         pad = int(round(max(x1 - x0, y1 - y0) * params.padding))
         x0, y0, x1, y1 = x0 - pad, y0 - pad, x1 + pad, y1 + pad
-        base = max(x1 - x0, y1 - y0)
+        cw = max(x1 - x0, (y1 - y0) * ar)
+    cw = cw / max(params.zoom, 1e-3)
+    ch = cw / ar
 
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-    side = base / max(params.zoom, 1e-3)
-    cx += params.offset_x * side / 2.0
-    cy += params.offset_y * side / 2.0
-    half = side / 2.0
-    box = (int(round(cx - half)), int(round(cy - half)), int(round(cx + half)), int(round(cy + half)))
-    log.info("crop.box", box=box, source=(w, h), size=size)
+    cx += params.offset_x * cw / 2.0
+    cy += params.offset_y * ch / 2.0
+    box = (int(round(cx - cw / 2.0)), int(round(cy - ch / 2.0)),
+           int(round(cx + cw / 2.0)), int(round(cy + ch / 2.0)))
 
-    out: list[np.ndarray] = []
-    for f in frames:
-        im = Image.fromarray(f, "RGBA").crop(box).resize((size, size), Image.LANCZOS)
-        out.append(np.asarray(im, dtype=np.uint8))
-    return out
-
-
-def fit_aspect(frames: list[np.ndarray], params, max_dim: int) -> list[np.ndarray]:
-    """Keep aspect ratio; scale so the longest side == max_dim. Zoom does a centered
-    crop (keeping aspect); offset pans. Used for GIFs (not forced square)."""
-    h, w = frames[0].shape[:2]
-    zoom = max(params.zoom, 1e-3)
-    cw, ch = w / zoom, h / zoom
-    cx = w / 2.0 + params.offset_x * cw / 2.0
-    cy = h / 2.0 + params.offset_y * ch / 2.0
-    box = (int(round(cx - cw / 2)), int(round(cy - ch / 2)), int(round(cx + cw / 2)), int(round(cy + ch / 2)))
-    scale = max_dim / float(max(cw, ch))
+    scale = long_side / float(max(cw, ch))
     tw, th = max(1, int(round(cw * scale))), max(1, int(round(ch * scale)))
-    # even dimensions keep ffmpeg/gif encoders happy
-    tw -= tw % 2; th -= th % 2
+    tw -= tw % 2; th -= th % 2          # even dims keep ffmpeg/gif encoders happy
     tw, th = max(2, tw), max(2, th)
-    log.info("crop.aspect", box=box, source=(w, h), target=(tw, th))
+    log.info("crop.box", box=box, source=(w, h), target=(tw, th), aspect=(aspect_w, aspect_h))
+
     out: list[np.ndarray] = []
     for f in frames:
         im = Image.fromarray(f, "RGBA").crop(box).resize((tw, th), Image.LANCZOS)
@@ -99,6 +93,11 @@ def fit_aspect(frames: list[np.ndarray], params, max_dim: int) -> list[np.ndarra
     return out
 
 
+def fit_square(frames: list[np.ndarray], params, has_alpha: bool, size: int = STICKER_SIZE) -> list[np.ndarray]:
+    """Square (1:1) crop+fit — thin wrapper over ``fit_to_canvas``."""
+    return fit_to_canvas(frames, params, has_alpha, 1, 1, size)
+
+
 # Back-compat alias (single-sticker callers).
 def fit_frames(frames: list[np.ndarray], params, has_alpha: bool) -> list[np.ndarray]:
-    return fit_square(frames, params, has_alpha, STICKER_SIZE)
+    return fit_to_canvas(frames, params, has_alpha, 1, 1, STICKER_SIZE)
