@@ -8,9 +8,14 @@ from pydantic import BaseModel, Field
 DISCORD_MAX_BYTES = 512 * 1024
 TARGET_BYTES = 500 * 1024
 STICKER_SIZE = 320
-# Hard cap on frames an animated sticker keeps. A 320x320 APNG under 512KB can't
-# hold many frames anyway, so capping early makes every later stage far cheaper.
-MAX_ANIM_FRAMES = 48
+# Max frames an animated sticker keeps. Inter-frame (apngasm) compression lets us
+# keep more frames under 512KB, so this is generous; encode trims further if needed.
+MAX_ANIM_FRAMES = 72
+
+
+class FitMode(str, Enum):
+    fit = "fit"    # show the whole image / subject, transparent-pad to square
+    fill = "fill"  # cover the square, cropping the long edge
 
 
 class BgModel(str, Enum):
@@ -39,6 +44,7 @@ class ProcessParams(BaseModel):
 
     # crop / fit
     auto_crop: bool = True
+    fit_mode: FitMode = FitMode.fit
     zoom: float = Field(1.0, ge=0.1, le=5.0)
     offset_x: float = Field(0.0, ge=-1.0, le=1.0)
     offset_y: float = Field(0.0, ge=-1.0, le=1.0)

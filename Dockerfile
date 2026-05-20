@@ -15,9 +15,10 @@ ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=2 \
     STATIC_DIR=/app/frontend/dist
 
-# ffmpeg = decode any video/animated; pngquant = APNG color optimization; libheif = HEIC
+# ffmpeg = decode any video/animated; pngquant = APNG color optimization;
+# apngasm = inter-frame APNG compression (more frames under 512KB); libheif = HEIC
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg pngquant libheif1 \
+        ffmpeg pngquant apngasm libheif1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

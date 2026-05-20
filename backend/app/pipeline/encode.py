@@ -16,6 +16,7 @@ import io
 import os
 import shutil
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -107,12 +108,52 @@ def _palette_frame_pngs(frames, colors) -> list[bytes] | None:
     return out
 
 
+def _apngasm_available() -> bool:
+    return shutil.which("apngasm") is not None
+
+
+def _assemble_apngasm(frame_pngs: list[bytes], delays) -> bytes | None:
+    """Assemble with apngasm: inter-frame delta + compression => much smaller files
+    (often 3-5x) so far more frames fit under 512KB. apngasm 2.x applies one global
+    delay, so we use the mean (video and most GIFs are uniform). None on any failure."""
+    if not _apngasm_available():
+        return None
+    delay_ms = max(10, int(round(sum(delays) / len(delays)))) if delays else 100
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            paths = []
+            for i, data in enumerate(frame_pngs):
+                p = os.path.join(td, f"f{i:04d}.png")
+                with open(p, "wb") as fh:
+                    fh.write(data)
+                paths.append(p)
+            out = os.path.join(td, "out.png")
+            # -z0 (zlib) + -i1: the inter-frame delta gives the size win; zlib keeps
+            # it fast (~3s/72 frames vs ~17s for 7zip) which matters since the encode
+            # ladder may assemble several times.
+            cmd = ["apngasm", out, *paths, str(delay_ms), "1000", "-z0", "-i1"]
+            proc = subprocess.run(cmd, capture_output=True)
+            if proc.returncode != 0 or not os.path.exists(out):
+                log.warning("encode.apngasm_failed", returncode=proc.returncode,
+                            stderr=proc.stderr.decode("utf-8", "replace")[:300])
+                return None
+            with open(out, "rb") as fh:
+                return fh.read()
+    except Exception:  # noqa: BLE001
+        log.warning("encode.apngasm_error", exc_info=True)
+        return None
+
+
 def _assemble_apng(frame_pngs: list[bytes], delays) -> bytes:
+    data = _assemble_apngasm(frame_pngs, delays)
+    if data is not None:
+        return data
+    # Fallback: pure-Python apng lib (full frames, preserves per-frame delays).
     from apng import APNG, PNG
 
     anim = APNG()
-    for data, delay in zip(frame_pngs, delays):
-        anim.append(PNG.from_bytes(data), delay=int(delay), delay_den=1000)
+    for png, delay in zip(frame_pngs, delays):
+        anim.append(PNG.from_bytes(png), delay=int(delay), delay_den=1000)
     anim.num_plays = 0  # loop forever
     return anim.to_bytes()
 
@@ -176,7 +217,8 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
     # Palette ladder, bounded above by the user's max_colors and below by the
     # priority's color floor. Fewer colors -> smaller frames -> more frames fit.
     floor = {"smooth": 16, "balanced": 32, "sharp": 64}.get(priority, 32)
-    ladder = [c for c in (128, 96, 64, 48, 32, 24, 16) if floor <= c <= params.max_colors]
+    # Coarse ladder keeps the number of (re)assembly passes small for speed.
+    ladder = [c for c in (128, 64, 32, 16) if floor <= c <= params.max_colors]
     if not ladder:
         ladder = [max(16, min(params.max_colors, 64))]
 

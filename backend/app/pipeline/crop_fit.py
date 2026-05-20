@@ -52,12 +52,19 @@ def fit_frames(frames: list[np.ndarray], params, has_alpha: bool) -> list[np.nda
     else:
         x0, y0, x1, y1 = 0, 0, w, h
 
-    bw, bh = x1 - x0, y1 - y0
-    pad = int(round(max(bw, bh) * params.padding))
-    x0, y0, x1, y1 = x0 - pad, y0 - pad, x1 + pad, y1 + pad
+    fit_mode = getattr(params, "fit_mode", "fit")
+    fit_mode = fit_mode.value if hasattr(fit_mode, "value") else fit_mode
+    if fit_mode == "fill":
+        # cover the square with the short edge; long edge cropped. No padding.
+        base = min(x1 - x0, y1 - y0)
+    else:
+        # show everything; breathing room via padding, square = long edge.
+        pad = int(round(max(x1 - x0, y1 - y0) * params.padding))
+        x0, y0, x1, y1 = x0 - pad, y0 - pad, x1 + pad, y1 + pad
+        base = max(x1 - x0, y1 - y0)
 
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-    side = max(x1 - x0, y1 - y0) / max(params.zoom, 1e-3)
+    side = base / max(params.zoom, 1e-3)
     cx += params.offset_x * side / 2.0
     cy += params.offset_y * side / 2.0
     half = side / 2.0
