@@ -22,6 +22,7 @@
       max_fps: 18,
       max_duration_s: 4.0,
       trim_start_s: 0.0,
+      priority: 'balanced',
       max_bytes: 512000,
       max_colors: 256
     }
@@ -324,6 +325,13 @@
             <label class="row"><span>Padding</span><input type="range" min="0" max="0.4" step="0.01" bind:value={params.padding} /></label>
             {#if meta.animated || true}
               <div class="grp">Animation</div>
+              <label class="row"><span>Priority</span>
+                <select bind:value={params.priority}>
+                  <option value="smooth">Smoother (keep frames)</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="sharp">Sharper (more colors)</option>
+                </select>
+              </label>
               <div class="est">≈ {estFrames} frames{estFrames >= 48 ? ' (capped at 48 to fit 512 KB)' : ''}</div>
               <label class="row"><span>Max FPS {params.max_fps}</span><input type="range" min="5" max="60" step="1" bind:value={params.max_fps} /></label>
               <label class="row"><span>Duration {params.max_duration_s}s</span><input type="range" min="0.5" max="10" step="0.5" bind:value={params.max_duration_s} /></label>

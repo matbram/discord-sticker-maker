@@ -21,6 +21,16 @@ class BgModel(str, Enum):
     u2net = "u2net"
 
 
+class Priority(str, Enum):
+    # How to spend the 512 KB budget for animated stickers:
+    #   smooth   -> keep the most frames, drop colors hard (down to 16)
+    #   balanced -> keep frames but stop at 32 colors before trimming frames
+    #   sharp    -> keep colors high, drop frames instead
+    smooth = "smooth"
+    balanced = "balanced"
+    sharp = "sharp"
+
+
 class ProcessParams(BaseModel):
     """Everything the pipeline needs. All optional — full-auto defaults."""
 
@@ -38,6 +48,7 @@ class ProcessParams(BaseModel):
     max_fps: int = Field(18, ge=1, le=60)
     max_duration_s: float = Field(4.0, ge=0.1, le=30.0)
     trim_start_s: float = Field(0.0, ge=0.0)
+    priority: Priority = Priority.balanced
 
     # encoding / size budget
     max_bytes: int = Field(TARGET_BYTES, ge=10 * 1024, le=DISCORD_MAX_BYTES)

@@ -133,6 +133,8 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
     frames, delays = even_subsample(frames, delays, MAX_ANIM_FRAMES)
     budget = params.max_bytes
     have_pq = _pngquant_available()
+    priority = getattr(params, "priority", "balanced")
+    priority = priority.value if hasattr(priority, "value") else priority
     best: tuple[bytes, int, list] | None = None
 
     def consider(data, nf, de):
@@ -145,34 +147,20 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
         if pngs is None:
             return None
         data = _assemble_apng(pngs, de)
-        log.info("encode.attempt", mode=mode, colors=colors, frames=len(fr), bytes=len(data))
+        log.info("encode.attempt", mode=mode, colors=colors, frames=len(fr), bytes=len(data), priority=priority)
         consider(data, len(fr), de)
         return data
 
-    # 1. Best quality: full-frame RGBA.
+    def done(data, fr, de):
+        return data, "APNG", len(fr), _avg_fps(de)
+
+    # 1. Lossless RGBA at full frames — best quality if it happens to fit.
     data = attempt("rgba", frames, delays)
     if data is not None and len(data) <= budget:
-        return data, "APNG", len(frames), _avg_fps(delays)
+        return done(data, frames, delays)
 
-    if have_pq:
-        # 2. Shared-palette (full alpha, ~3-4x smaller) at full frames.
-        data = attempt("pal", frames, delays, 64)
-        if data is not None and len(data) <= budget:
-            return data, "APNG", len(frames), _avg_fps(delays)
-
-        # 3. Estimate the frame budget from the measured per-frame size, then re-try.
-        per_frame = len(best[0]) / max(len(best[2]), 1)
-        target = max(8, int(budget / per_frame * 0.9))
-        if target < len(frames):
-            f2, d2 = even_subsample(frames, delays, target)
-            data = attempt("pal", f2, d2, 64)
-            if data is not None and len(data) <= budget:
-                return data, "APNG", len(f2), _avg_fps(d2)
-            data = attempt("pal", f2, d2, 32)  # 4. last resort: fewer colors
-            if data is not None and len(data) <= budget:
-                return data, "APNG", len(f2), _avg_fps(d2)
-    else:
-        # No pngquant: reduce frames (RGBA only).
+    if not have_pq:
+        # No pngquant: only lever is dropping frames (RGBA).
         for divisor in (2, 3, 4):
             target = max(8, len(frames) // divisor)
             if target >= len(frames):
@@ -180,7 +168,46 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
             f2, d2 = even_subsample(frames, delays, target)
             data = attempt("rgba", f2, d2)
             if data is not None and len(data) <= budget:
-                return data, "APNG", len(f2), _avg_fps(d2)
+                return done(data, f2, d2)
+        assert best is not None
+        log.warning("encode.over_budget", bytes=len(best[0]), budget=budget)
+        return best[0], "APNG", best[1], _avg_fps(best[2])
+
+    # Palette ladder, bounded above by the user's max_colors and below by the
+    # priority's color floor. Fewer colors -> smaller frames -> more frames fit.
+    floor = {"smooth": 16, "balanced": 32, "sharp": 64}.get(priority, 32)
+    ladder = [c for c in (128, 96, 64, 48, 32, 24, 16) if floor <= c <= params.max_colors]
+    if not ladder:
+        ladder = [max(16, min(params.max_colors, 64))]
+
+    if priority == "sharp":
+        # Color-first: keep colors high, drop frames to fit.
+        data = attempt("pal", frames, delays, ladder[0])
+        if data is not None and len(data) <= budget:
+            return done(data, frames, delays)
+        per_frame = len(best[0]) / max(len(best[2]), 1)
+        target = max(8, int(budget / per_frame * 0.9))
+        if target < len(frames):
+            f2, d2 = even_subsample(frames, delays, target)
+            for colors in ladder:
+                data = attempt("pal", f2, d2, colors)
+                if data is not None and len(data) <= budget:
+                    return done(data, f2, d2)
+    else:
+        # Frame-first (smooth / balanced): keep ALL frames, lower colors until it
+        # fits — this maximizes smoothness, which is what most people want.
+        for colors in ladder:
+            data = attempt("pal", frames, delays, colors)
+            if data is not None and len(data) <= budget:
+                return done(data, frames, delays)
+        # Even the fewest colors at full frames won't fit — drop frames at the floor.
+        per_frame = len(best[0]) / max(len(best[2]), 1)
+        target = max(8, int(budget / per_frame * 0.9))
+        if target < len(frames):
+            f2, d2 = even_subsample(frames, delays, target)
+            data = attempt("pal", f2, d2, ladder[-1])
+            if data is not None and len(data) <= budget:
+                return done(data, f2, d2)
 
     assert best is not None
     log.warning("encode.over_budget", bytes=len(best[0]), budget=budget)
