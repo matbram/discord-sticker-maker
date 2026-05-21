@@ -112,10 +112,14 @@ def _apngasm_available() -> bool:
     return shutil.which("apngasm") is not None
 
 
-def _assemble_apngasm(frame_pngs: list[bytes], delays) -> bytes | None:
+def _assemble_apngasm(frame_pngs: list[bytes], delays, zlevel: int = 0) -> bytes | None:
     """Assemble with apngasm: inter-frame delta + compression => much smaller files
     (often 3-5x) so far more frames fit under 512KB. apngasm 2.x applies one global
-    delay, so we use the mean (video and most GIFs are uniform). None on any failure."""
+    delay, so we use the mean (video and most GIFs are uniform). None on any failure.
+
+    zlevel selects the deflater: 0=zlib (fast, ~3s/72 frames), 1=7zip (slower, ~17s,
+    but noticeably smaller). "smooth" uses 7zip so the freed bytes buy more colours
+    at the same frame count."""
     if not _apngasm_available():
         return None
     delay_ms = max(10, int(round(sum(delays) / len(delays)))) if delays else 100
@@ -128,10 +132,8 @@ def _assemble_apngasm(frame_pngs: list[bytes], delays) -> bytes | None:
                     fh.write(data)
                 paths.append(p)
             out = os.path.join(td, "out.png")
-            # -z0 (zlib) + -i1: the inter-frame delta gives the size win; zlib keeps
-            # it fast (~3s/72 frames vs ~17s for 7zip) which matters since the encode
-            # ladder may assemble several times.
-            cmd = ["apngasm", out, *paths, str(delay_ms), "1000", "-z0", "-i1"]
+            # -i1: the inter-frame delta gives the size win; the deflater is per zlevel.
+            cmd = ["apngasm", out, *paths, str(delay_ms), "1000", f"-z{zlevel}", "-i1"]
             proc = subprocess.run(cmd, capture_output=True)
             if proc.returncode != 0 or not os.path.exists(out):
                 log.warning("encode.apngasm_failed", returncode=proc.returncode,
@@ -144,8 +146,8 @@ def _assemble_apngasm(frame_pngs: list[bytes], delays) -> bytes | None:
         return None
 
 
-def _assemble_apng(frame_pngs: list[bytes], delays) -> bytes:
-    data = _assemble_apngasm(frame_pngs, delays)
+def _assemble_apng(frame_pngs: list[bytes], delays, zlevel: int = 0) -> bytes:
+    data = _assemble_apngasm(frame_pngs, delays, zlevel)
     if data is not None:
         return data
     # Fallback: pure-Python apng lib (full frames, preserves per-frame delays).
@@ -168,13 +170,13 @@ def _run_parallel(funcs):
         return list(ex.map(lambda fn: fn(), funcs))
 
 
-def _rgba_apng(frames, delays):
-    return _assemble_apng(_parallel_rgba_pngs(frames), delays)
+def _rgba_apng(frames, delays, zlevel: int = 0):
+    return _assemble_apng(_parallel_rgba_pngs(frames), delays, zlevel)
 
 
-def _palette_apng(frames, delays, colors):
+def _palette_apng(frames, delays, colors, zlevel: int = 0):
     pngs = _palette_frame_pngs(frames, colors)
-    return _assemble_apng(pngs, delays) if pngs is not None else None
+    return _assemble_apng(pngs, delays, zlevel) if pngs is not None else None
 
 
 def _write_frames(frames, td) -> None:
@@ -276,6 +278,9 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
     have_pq = _pngquant_available()
     priority = getattr(params, "priority", "balanced")
     priority = priority.value if hasattr(priority, "value") else priority
+    # "smooth" wants max frames AND colour: pay for 7zip (-z1) so the smaller files
+    # let a higher palette (or RGBA) fit at the same frame count. Others stay on zlib.
+    zlevel = 1 if priority == "smooth" else 0
 
     def done(data, fr, de):
         return data, "APNG", len(fr), _avg_fps(de)
@@ -285,7 +290,7 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
         best = None
         for div in (1, 2, 3, 4):
             f2, d2 = (frames, delays) if div == 1 else even_subsample(frames, delays, max(8, len(frames) // div))
-            data = _rgba_apng(f2, d2)
+            data = _rgba_apng(f2, d2, zlevel)
             if best is None or len(data) < len(best[0]):
                 best = (data, f2, d2)
             if len(data) <= budget:
@@ -298,16 +303,16 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
     ladder = [c for c in (128, 64, 32, 16, 8) if floor <= c <= params.max_colors] or [max(8, min(params.max_colors, 64))]
 
     # One probe at the floor color, full frames, tells us how big things are.
-    probe = _palette_apng(frames, delays, floor)
+    probe = _palette_apng(frames, delays, floor, zlevel)
     if probe is None:
-        return done(_rgba_apng(frames, delays), frames, delays)
+        return done(_rgba_apng(frames, delays, zlevel), frames, delays)
     log.info("encode.probe", colors=floor, frames=len(frames), bytes=len(probe), priority=priority)
     BIG = 1_000_000  # rgba sentinel for "max quality"
 
     if len(probe) <= budget and priority != "sharp":
         # Full frames fit -> spend headroom on quality (more colors / rgba), in parallel.
-        cand = [(BIG, lambda: _rgba_apng(frames, delays))] + \
-               [(c, (lambda c=c: _palette_apng(frames, delays, c))) for c in ladder if c > floor]
+        cand = [(BIG, lambda: _rgba_apng(frames, delays, zlevel))] + \
+               [(c, (lambda c=c: _palette_apng(frames, delays, c, zlevel))) for c in ladder if c > floor]
         res = _run_parallel([fn for _, fn in cand])
         scored = [(q, d) for (q, _), d in zip(cand, res) if d is not None and len(d) <= budget]
         if scored:
@@ -319,7 +324,7 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
     per = len(probe) / max(len(frames), 1)
     target = min(len(frames), max(8, int(budget / per * 0.9))) if len(probe) > budget else len(frames)
     f2, d2 = even_subsample(frames, delays, target)
-    res = _run_parallel([(lambda c=c: _palette_apng(f2, d2, c)) for c in ladder])
+    res = _run_parallel([(lambda c=c: _palette_apng(f2, d2, c, zlevel)) for c in ladder])
     for c, d in zip(ladder, res):
         log.info("encode.attempt", colors=c, frames=len(f2), bytes=(len(d) if d else -1), priority=priority)
     scored = [(c, d) for c, d in zip(ladder, res) if d is not None and len(d) <= budget]
@@ -328,7 +333,7 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
 
     # Still over -> halve frames at the floor color.
     f3, d3 = even_subsample(frames, delays, max(6, target // 2))
-    d = _palette_apng(f3, d3, floor)
+    d = _palette_apng(f3, d3, floor, zlevel)
     if d is not None:
         log.warning("encode.over_budget", bytes=len(d), budget=budget, frames=len(f3))
         return done(d, f3, d3)
