@@ -28,7 +28,7 @@ class BgModel(str, Enum):
 
 class Priority(str, Enum):
     # How to spend the byte budget for animated output:
-    #   smooth   -> keep the most frames, drop colors hard
+    #   smooth   -> favor the most frames, but keep >=24 colors (no sepia)
     #   balanced -> keep frames but stop mid-way before trimming frames
     #   sharp    -> keep colors high, drop frames instead
     smooth = "smooth"

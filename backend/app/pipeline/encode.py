@@ -292,7 +292,9 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
                 return done(data, f2, d2)
         return done(best[0], best[1], best[2])
 
-    floor = {"smooth": 8, "balanced": 32, "sharp": 64}.get(priority, 32)
+    # Per-priority minimum palette. "smooth" favors frames but never drops below 24
+    # colors — an 8-colour shared palette is what made smooth output look sepia.
+    floor = {"smooth": 24, "balanced": 32, "sharp": 64}.get(priority, 32)
     ladder = [c for c in (128, 64, 32, 16, 8) if floor <= c <= params.max_colors] or [max(8, min(params.max_colors, 64))]
 
     # One probe at the floor color, full frames, tells us how big things are.
