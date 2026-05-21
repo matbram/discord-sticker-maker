@@ -10,6 +10,7 @@
   export let selected = {}
   export let focusedType = ''
   export let params = {}
+  export let framing = {}
   export let src = ''
   export let isVideo = false
   export let naturalW = 0
@@ -35,12 +36,13 @@
   {#each shown as t (t.id)}
     {@const o = getOut(t.id)}
     {@const ar = aspectFor(t.id)}
+    {@const fr = framing[t.id] || { zoom: 1, offset_x: 0, offset_y: 0, fit_mode: 'fit' }}
     <button class="mini" class:focused={focusedType === t.id} on:click={() => dispatch('focus', { type: t.id })}>
       <div class="mini-stage">
         <ProgramMonitor {src} {isVideo} {naturalW} {naturalH}
                         aspectW={ar[0]} aspectH={ar[1]}
-                        fitMode={params.fit_mode} padding={params.padding}
-                        zoom={params.zoom} offsetX={params.offset_x} offsetY={params.offset_y}
+                        fitMode={fr.fit_mode} padding={params.padding}
+                        zoom={fr.zoom} offsetX={fr.offset_x} offsetY={fr.offset_y}
                         trimStart={params.trim_start_s} trimLen={params.max_duration_s}
                         bakedUrl={bakedFor(t.id)} {previewBg} {busy}
                         interactive={false} maxW={116} maxH={116} />

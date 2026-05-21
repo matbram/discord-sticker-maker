@@ -38,6 +38,12 @@
 
   let selected = { gif: true, sticker: true, emoji: true }
   let focusedType = 'gif'
+  // Per-output framing (pan/zoom/fit) — each format is independent.
+  function defaultFraming() {
+    const f = { zoom: 1, offset_x: 0, offset_y: 0, fit_mode: 'fit' }
+    return { gif: { ...f }, sticker: { ...f }, emoji: { ...f } }
+  }
+  let framing = defaultFraming()
 
   let jobId = null
   let doneJob = null // job whose results are actually ready (drives preview URLs)
@@ -91,7 +97,8 @@
     source = { file }
     sourceIsVideo = (file.type || '').startsWith('video/')
     sourceUrl = URL.createObjectURL(file)
-    params = { ...params, zoom: 1, offset_x: 0, offset_y: 0, trim_start_s: 0, max_duration_s: 4.0 }
+    params = { ...params, trim_start_s: 0, max_duration_s: 4.0 }
+    framing = defaultFraming()
     analyze()
     create()
   }
@@ -101,16 +108,18 @@
     source = { url }
     sourceIsVideo = /\.(mp4|mov|webm|mkv|avi)(\?|$)/i.test(url)
     sourceUrl = url
-    params = { ...params, zoom: 1, offset_x: 0, offset_y: 0, trim_start_s: 0, max_duration_s: 4.0 }
+    params = { ...params, trim_start_s: 0, max_duration_s: 4.0 }
+    framing = defaultFraming()
     analyze()
     create()
   }
 
   function buildOutputs() {
+    const f = (t) => ({ zoom: framing[t].zoom, offset_x: framing[t].offset_x, offset_y: framing[t].offset_y, fit_mode: framing[t].fit_mode })
     const list = []
-    if (selected.sticker) list.push({ type: 'sticker', priority: params.priority })
-    if (selected.emoji) list.push({ type: 'emoji', priority: params.priority })
-    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect })
+    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect, ...f('gif') })
+    if (selected.sticker) list.push({ type: 'sticker', priority: params.priority, ...f('sticker') })
+    if (selected.emoji) list.push({ type: 'emoji', priority: params.priority, ...f('emoji') })
     return list
   }
   $: anySelected = selected.sticker || selected.emoji || selected.gif
@@ -164,8 +173,8 @@
     if (!anySelected) { selected = { ...selected, [id]: true }; return } // keep at least one
     if (view === 'done') scheduleRegen()
   }
-  function onCropChange(e) { params = { ...params, zoom: e.detail.zoom, offset_x: e.detail.offsetX, offset_y: e.detail.offsetY }; scheduleRegen() }
-  function setFit(m) { params = { ...params, fit_mode: m, zoom: 1, offset_x: 0, offset_y: 0 }; scheduleRegen() }
+  function onCropChange(e) { framing = { ...framing, [focusedType]: { ...framing[focusedType], zoom: e.detail.zoom, offset_x: e.detail.offsetX, offset_y: e.detail.offsetY } }; scheduleRegen() }
+  function setFit(m) { framing = { ...framing, [focusedType]: { zoom: 1, offset_x: 0, offset_y: 0, fit_mode: m } }; scheduleRegen() }
   function setPriority(p) { params = { ...params, priority: p }; scheduleRegen() }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
@@ -190,6 +199,7 @@
   function previewUrl(type) { return doneJob ? `/api/result/${doneJob}/${type}?v=${doneJob}` : '' }
   function getOut(type) { return outputs.find((o) => o.type === type) }
 
+  $: fr = framing[focusedType] || framing.gif
   $: focusAspect = focusedType === 'gif' ? resolveAspect(params.gif_aspect, sourceW, sourceH) : [1, 1]
   $: focusOut = outputs.find((o) => o.type === focusedType)
   $: focusBaked = focusOut && doneJob ? previewUrl(focusedType) : ''
@@ -263,8 +273,8 @@
             <div class="monitor-wrap">
               <ProgramMonitor src={sourceUrl} isVideo={sourceIsVideo} naturalW={sourceW} naturalH={sourceH}
                               aspectW={focusAspect[0]} aspectH={focusAspect[1]}
-                              fitMode={params.fit_mode} padding={params.padding}
-                              zoom={params.zoom} offsetX={params.offset_x} offsetY={params.offset_y}
+                              fitMode={fr.fit_mode} padding={params.padding}
+                              zoom={fr.zoom} offsetX={fr.offset_x} offsetY={fr.offset_y}
                               trimStart={params.trim_start_s} trimLen={params.max_duration_s}
                               bakedUrl={focusBaked} {previewBg} {busy} maxW={400} maxH={400}
                               on:change={onCropChange} />
@@ -288,7 +298,7 @@
 
         <div class="strip-card">
           <div class="strip-head"><span>Your outputs</span><span class="muted-line">click a format to edit it · shared edits apply to all</span></div>
-          <OutputStrip types={TYPES} {selected} {focusedType} {params}
+          <OutputStrip types={TYPES} {selected} {focusedType} {params} {framing}
                        src={sourceUrl} isVideo={sourceIsVideo} naturalW={sourceW} naturalH={sourceH}
                        {outputs} jobId={doneJob} {previewBg} {busy} on:focus={focusOutput} />
         </div>
@@ -297,10 +307,10 @@
       <!-- sidebar: shared edits + focused controls + downloads -->
       <aside class="side">
         <h3>Edit</h3>
-        <div class="ctl"><span class="ctl-label">Framing</span>
+        <div class="ctl"><span class="ctl-label">Framing · {focusMeta.label}</span>
           <div class="seg small">
-            <button class:on={params.fit_mode === 'fit'} on:click={() => setFit('fit')}>Fit</button>
-            <button class:on={params.fit_mode === 'fill'} on:click={() => setFit('fill')}>Fill</button>
+            <button class:on={fr.fit_mode === 'fit'} on:click={() => setFit('fit')}>Fit</button>
+            <button class:on={fr.fit_mode === 'fill'} on:click={() => setFit('fill')}>Fill</button>
           </div>
         </div>
         <label class="toggle"><span>Cut out background</span><input type="checkbox" checked={params.remove_bg} on:change={toggleBg} /></label>

@@ -97,6 +97,12 @@ class OutputSpec(BaseModel):
     max_colors: Optional[int] = Field(None, ge=2, le=256)
     gif_quality: GifQuality = GifQuality.balanced
     aspect: GifAspect = GifAspect.source  # GIF-only; sticker/emoji ignore it (always square)
+    # Per-output framing — falls back to the shared ProcessParams values when unset,
+    # so panning/zooming one format never moves the others.
+    zoom: Optional[float] = Field(None, ge=0.1, le=5.0)
+    offset_x: Optional[float] = Field(None, ge=-1.0, le=1.0)
+    offset_y: Optional[float] = Field(None, ge=-1.0, le=1.0)
+    fit_mode: Optional[FitMode] = None
 
 
 class ProcessParams(BaseModel):

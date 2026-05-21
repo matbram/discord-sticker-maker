@@ -93,6 +93,10 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
         eff = params.model_copy(update={
             "priority": spec.priority or params.priority,
             "max_colors": spec.max_colors or params.max_colors,
+            "zoom": spec.zoom if spec.zoom is not None else params.zoom,
+            "offset_x": spec.offset_x if spec.offset_x is not None else params.offset_x,
+            "offset_y": spec.offset_y if spec.offset_y is not None else params.offset_y,
+            "fit_mode": spec.fit_mode if spec.fit_mode is not None else params.fit_mode,
         })
         fr, de = base_frames, delays
         if animated_src and len(fr) > prof["frame_cap"]:
