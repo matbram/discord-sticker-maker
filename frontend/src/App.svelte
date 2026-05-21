@@ -16,7 +16,7 @@
 
   function defaultParams() {
     return {
-      remove_bg: false, bg_model: 'auto', auto_crop: true, fit_mode: 'fit',
+      remove_bg: false, bg_model: 'auto', auto_crop: true, fit_mode: 'fill',
       zoom: 1.0, offset_x: 0.0, offset_y: 0.0, padding: 0.06,
       max_fps: 18, max_duration_s: 4.0, trim_start_s: 0.0,
       priority: 'balanced', max_colors: 256, gif_quality: 'balanced', gif_aspect: 'source'
@@ -38,9 +38,9 @@
 
   let selected = { gif: true, sticker: true, emoji: true }
   let focusedType = 'gif'
-  // Per-output framing (pan/zoom/fit) — each format is independent.
+  // Per-output framing (pan/zoom/fit); sticker & emote stay locked, gif is independent.
   function defaultFraming() {
-    const f = { zoom: 1, offset_x: 0, offset_y: 0, fit_mode: 'fit' }
+    const f = { zoom: 1, offset_x: 0, offset_y: 0, fit_mode: 'fill' }
     return { gif: { ...f }, sticker: { ...f }, emoji: { ...f } }
   }
   let framing = defaultFraming()
