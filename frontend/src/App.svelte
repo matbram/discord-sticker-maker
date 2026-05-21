@@ -16,7 +16,7 @@
 
   function defaultParams() {
     return {
-      remove_bg: false, bg_model: 'auto', auto_crop: true, fit_mode: 'fit',
+      remove_bg: false, bg_model: 'auto', auto_crop: true, fit_mode: 'fill',
       zoom: 1.0, offset_x: 0.0, offset_y: 0.0, padding: 0.06,
       max_fps: 18, max_duration_s: 4.0, trim_start_s: 0.0,
       priority: 'balanced', max_colors: 256, gif_quality: 'balanced', gif_aspect: 'source'
@@ -38,9 +38,9 @@
 
   let selected = { gif: true, sticker: true, emoji: true }
   let focusedType = 'gif'
-  // Per-output framing (pan/zoom/fit) — each format is independent.
+  // Per-output framing (pan/zoom/fit); sticker & emote stay locked, gif is independent.
   function defaultFraming() {
-    const f = { zoom: 1, offset_x: 0, offset_y: 0, fit_mode: 'fit' }
+    const f = { zoom: 1, offset_x: 0, offset_y: 0, fit_mode: 'fill' }
     return { gif: { ...f }, sticker: { ...f }, emoji: { ...f } }
   }
   let framing = defaultFraming()
@@ -52,6 +52,7 @@
   let outputs = [] // [{type, format, meta}]
   let previewBg = 'checker'
   let snapAxis = false // snap pan to center axes (guide lines)
+  let lockStickerEmote = true // pan/zoom/fit of sticker & emote stay in sync
   let error = { message: '', requestId: '' }
   let closeStream = null
   let watchdogTimer = null
@@ -174,8 +175,26 @@
     if (!anySelected) { selected = { ...selected, [id]: true }; return } // keep at least one
     if (view === 'done') scheduleRegen()
   }
-  function onCropChange(e) { framing = { ...framing, [focusedType]: { ...framing[focusedType], zoom: e.detail.zoom, offset_x: e.detail.offsetX, offset_y: e.detail.offsetY } }; scheduleRegen() }
-  function setFit(m) { framing = { ...framing, [focusedType]: { zoom: 1, offset_x: 0, offset_y: 0, fit_mode: m } }; scheduleRegen() }
+  // Sticker & emote can share one framing (both are square crops); gif is always independent.
+  const LINKED = ['sticker', 'emoji']
+  const sameFraming = (a, b) => a.zoom === b.zoom && a.offset_x === b.offset_x && a.offset_y === b.offset_y && a.fit_mode === b.fit_mode
+  function applyFraming(patch) {
+    const keys = lockStickerEmote && LINKED.includes(focusedType) ? LINKED : [focusedType]
+    const next = { ...framing }
+    for (const k of keys) next[k] = { ...framing[k], ...patch }
+    framing = next
+  }
+  function toggleLock() {
+    lockStickerEmote = !lockStickerEmote
+    if (lockStickerEmote) {
+      // align the pair to whichever you're editing (sticker wins if gif is focused)
+      const src = focusedType === 'emoji' ? 'emoji' : 'sticker'
+      const dst = src === 'sticker' ? 'emoji' : 'sticker'
+      if (!sameFraming(framing[src], framing[dst])) { framing = { ...framing, [dst]: { ...framing[src] } }; scheduleRegen() }
+    }
+  }
+  function onCropChange(e) { applyFraming({ zoom: e.detail.zoom, offset_x: e.detail.offsetX, offset_y: e.detail.offsetY }); scheduleRegen() }
+  function setFit(m) { applyFraming({ zoom: 1, offset_x: 0, offset_y: 0, fit_mode: m }); scheduleRegen() }
   function setPriority(p) { params = { ...params, priority: p }; scheduleRegen() }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
@@ -308,12 +327,16 @@
       <!-- sidebar: shared edits + focused controls + downloads -->
       <aside class="side">
         <h3>Edit</h3>
-        <div class="ctl"><span class="ctl-label">Framing · {focusMeta.label}</span>
+        <div class="ctl"><span class="ctl-label">Framing · {lockStickerEmote && LINKED.includes(focusedType) ? 'Sticker + Emote (linked)' : focusMeta.label}</span>
           <div class="seg small">
             <button class:on={fr.fit_mode === 'fit'} on:click={() => setFit('fit')}>Fit</button>
             <button class:on={fr.fit_mode === 'fill'} on:click={() => setFit('fill')}>Fill</button>
           </div>
         </div>
+        {#if selected.sticker && selected.emoji}
+          <label class="toggle"><span>Lock sticker &amp; emote framing</span><input type="checkbox" checked={lockStickerEmote} on:change={toggleLock} /></label>
+          <p class="muted-line">Pan, zoom &amp; fit apply to both together. GIF is always separate.</p>
+        {/if}
         <label class="toggle"><span>Snap pan to center</span><input type="checkbox" checked={snapAxis} on:change={() => (snapAxis = !snapAxis)} /></label>
         <p class="muted-line">Snap shows center guides; hold ⇧ while dragging to lock to one axis.</p>
         <label class="toggle"><span>Cut out background</span><input type="checkbox" checked={params.remove_bg} on:change={toggleBg} /></label>
