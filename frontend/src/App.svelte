@@ -165,7 +165,7 @@
     if (view === 'done') scheduleRegen()
   }
   function onCropChange(e) { params = { ...params, zoom: e.detail.zoom, offset_x: e.detail.offsetX, offset_y: e.detail.offsetY }; scheduleRegen() }
-  function setFit(m) { params = { ...params, fit_mode: m }; scheduleRegen() }
+  function setFit(m) { params = { ...params, fit_mode: m, zoom: 1, offset_x: 0, offset_y: 0 }; scheduleRegen() }
   function setPriority(p) { params = { ...params, priority: p }; scheduleRegen() }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
