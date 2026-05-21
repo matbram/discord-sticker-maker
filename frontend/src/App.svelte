@@ -40,6 +40,7 @@
   let focusedType = 'sticker'
 
   let jobId = null
+  let doneJob = null // job whose results are actually ready (drives preview URLs)
   let uploadPct = 0
   let progress = { stage: '', message: '', done: null, total: null }
   let outputs = [] // [{type, format, meta}]
@@ -147,6 +148,7 @@
     } else if (evt.type === 'result') {
       disarmWatchdog(); busy = false
       outputs = evt.outputs || []
+      doneJob = jobId
       view = 'done'
       logger.event('done', { outputs: outputs.map((o) => o.type) })
       if (pendingRegen) { pendingRegen = false; run() }
@@ -174,23 +176,23 @@
   function reset() {
     if (closeStream) closeStream(); disarmWatchdog(); clearSourceUrl()
     busy = false; view = 'idle'; source = null; urlInput = ''; sourceUrl = ''; sourceW = 0; sourceH = 0
-    outputs = []; jobId = null
+    outputs = []; jobId = null; doneJob = null
   }
 
   function download(type) {
     const a = document.createElement('a')
-    a.href = resultUrl(jobId, { type, download: true })
+    a.href = resultUrl(doneJob, { type, download: true })
     document.body.appendChild(a); a.click(); a.remove()
     logger.event('download', { type })
   }
   function downloadAll() { download('all') }
 
-  function previewUrl(type) { return `/api/result/${jobId}/${type}?v=${jobId}` }
+  function previewUrl(type) { return doneJob ? `/api/result/${doneJob}/${type}?v=${doneJob}` : '' }
   function getOut(type) { return outputs.find((o) => o.type === type) }
 
   $: focusAspect = focusedType === 'gif' ? resolveAspect(params.gif_aspect, sourceW, sourceH) : [1, 1]
   $: focusOut = outputs.find((o) => o.type === focusedType)
-  $: focusBaked = focusOut && jobId ? previewUrl(focusedType) : ''
+  $: focusBaked = focusOut && doneJob ? previewUrl(focusedType) : ''
   $: focusMeta = TYPES.find((t) => t.id === focusedType) || TYPES[0]
 
   // ---- global drag & paste ----
@@ -292,7 +294,7 @@
           {/if}
           {#if sourceAnimated}
             <div class="transport">
-              <Timeline src={sourceUrl} isVideo={sourceIsVideo} mimeType={source?.file?.type || ''}
+              <Timeline src={sourceUrl} isVideo={sourceIsVideo}
                         start={params.trim_start_s} length={params.max_duration_s} on:change={onTrimChange} />
             </div>
           {/if}
@@ -310,7 +312,7 @@
           <div class="strip-head"><span>Your outputs</span><span class="muted-line">click a format to edit it · shared edits apply to all</span></div>
           <OutputStrip types={TYPES} {selected} {focusedType} {params}
                        src={sourceUrl} isVideo={sourceIsVideo} naturalW={sourceW} naturalH={sourceH}
-                       {outputs} {jobId} {previewBg} {busy} on:focus={focusOutput} />
+                       {outputs} jobId={doneJob} {previewBg} {busy} on:focus={focusOutput} />
         </div>
       </div>
 

@@ -3,11 +3,10 @@
   // video metadata, or (for GIF/APNG/WebP) WebCodecs ImageDecoder; if neither is
   // available we fall back to coarse range sliders. Emits { start, length } ->
   // trim_start_s / max_duration_s. The program monitor reseeks off trim_start.
-  import { createEventDispatcher, onMount } from 'svelte'
+  import { createEventDispatcher } from 'svelte'
 
   export let src = ''
   export let isVideo = false
-  export let mimeType = ''
   export let start = 0
   export let length = 4
 
@@ -24,35 +23,10 @@
 
   function emit() { dispatch('change', { start: +start.toFixed(2), length: +length.toFixed(2) }) }
 
-  // Learn the source duration only for the track scale; NEVER emit on mount. Auto-
-  // emitting a clamped value used to silently trim the clip to a sliver (e.g. a GIF
-  // whose duration was read too early came back as 0.38s). Trim only changes when the
-  // user drags a handle.
+  // Video reports a reliable duration -> show the scrub track. Animated images
+  // (GIF/APNG/WebP) don't expose one cheaply, so they fall back to the length slider
+  // below. Trim only changes on a user action — never auto-emitted on mount.
   function onMeta() { duration = videoEl?.duration || 0 }
-
-  onMount(async () => {
-    if (isVideo) return
-    const d = await imageDuration(src, mimeType)
-    if (d > 0) duration = d
-  })
-
-  async function imageDuration(url, type) {
-    if (!('ImageDecoder' in window)) return 0
-    try {
-      const buf = await (await fetch(url)).arrayBuffer()
-      const dec = new ImageDecoder({ data: buf, type: type || 'image/gif' })
-      await dec.completed            // all frames buffered -> frameCount is final
-      const track = dec.tracks.selectedTrack
-      const count = track?.frameCount || 1
-      let total = 0                  // sum the real per-frame durations (µs)
-      for (let i = 0; i < count; i++) {
-        const { image, duration: d } = await dec.decode({ frameIndex: i })
-        total += d || 0
-        image.close()
-      }
-      return total > 0 ? total / 1e6 : count * 0.1
-    } catch (_) { return 0 }
-  }
 
   // ---- track dragging (when duration known) ----
   function frac(e) { const r = trackEl.getBoundingClientRect(); return clamp((e.clientX - r.left) / r.width, 0, 1) }
