@@ -8,9 +8,9 @@
   import { resolveAspect } from './lib/cropMath.js'
 
   const TYPES = [
+    { id: 'gif', emoji: '🎞️', label: 'GIF', blurb: 'shareable in chat' },
     { id: 'sticker', emoji: '🏷️', label: 'Sticker', blurb: '320×320 chat sticker' },
-    { id: 'emoji', emoji: '😄', label: 'Emoji', blurb: '128×128 custom emoji' },
-    { id: 'gif', emoji: '🎞️', label: 'GIF', blurb: 'shareable in chat' }
+    { id: 'emoji', emoji: '😄', label: 'Emoji', blurb: '128×128 custom emoji' }
   ]
   const STAGE_LABELS = { upload: 'Uploading', decode: 'Reading', bg: 'Cutting out', encode: 'Encoding', output_done: 'Encoding', done: 'Done' }
 
@@ -36,8 +36,8 @@
   let sourceW = 0
   let sourceH = 0
 
-  let selected = { sticker: true, emoji: false, gif: false }
-  let focusedType = 'sticker'
+  let selected = { gif: true, sticker: true, emoji: true }
+  let focusedType = 'gif'
 
   let jobId = null
   let doneJob = null // job whose results are actually ready (drives preview URLs)
@@ -81,7 +81,7 @@
     loadDims(sourceUrl, sourceIsVideo)
     sourceAnimated = sourceIsVideo || /\.gif(\?|$)/i.test(source.file?.name || source.url || '') || (source.file?.type === 'image/gif')
     // make everything by default — the editor lets them toggle outputs off
-    selected = { sticker: true, emoji: true, gif: true }
+    selected = { gif: true, sticker: true, emoji: true }
   }
 
   function pickFiles(list) {
