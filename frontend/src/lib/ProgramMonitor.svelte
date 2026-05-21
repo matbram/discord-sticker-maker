@@ -24,15 +24,17 @@
   export let previewBg = 'checker'
   export let busy = false
   export let interactive = true
+  export let snap = false        // snap pan to the center axes (with guide lines)
   export let maxW = 360
   export let maxH = 360
 
   const dispatch = createEventDispatcher()
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
+  const SNAP = 0.05              // offset units within which we snap to a center axis
 
   let dragging = false
-  let lastX = 0
-  let lastY = 0
+  let startX = 0, startY = 0, startOX = 0, startOY = 0
+  let guideV = false, guideH = false  // show center axis guide lines while snapped
   let videoEl
 
   $: stage = stageSize(aspectW, aspectH, maxW, maxH)
@@ -56,18 +58,30 @@
 
   function down(e) {
     if (!interactive) return
-    dragging = true; lastX = e.clientX; lastY = e.clientY
+    dragging = true
+    startX = e.clientX; startY = e.clientY; startOX = offsetX; startOY = offsetY
     e.target.setPointerCapture?.(e.pointerId)
   }
   function move(e) {
     if (!dragging) return
-    const { dOffsetX, dOffsetY } = dragDelta(e.clientX - lastX, e.clientY - lastY, stage.w, stage.h)
-    offsetX = clamp(offsetX + dOffsetX, -1, 1)
-    offsetY = clamp(offsetY + dOffsetY, -1, 1)
-    lastX = e.clientX; lastY = e.clientY
+    const dx = e.clientX - startX, dy = e.clientY - startY
+    const d = dragDelta(dx, dy, stage.w, stage.h)
+    let nx = clamp(startOX + d.dOffsetX, -1, 1)
+    let ny = clamp(startOY + d.dOffsetY, -1, 1)
+    guideV = guideH = false
+    if (e.shiftKey) {
+      // lock to the dominant drag direction — precise single-axis pan, no lines
+      if (Math.abs(dx) >= Math.abs(dy)) ny = startOY
+      else nx = startOX
+    } else if (snap) {
+      // magnet to the center axes; show a guide line on whichever axis snapped
+      if (Math.abs(nx) <= SNAP) { nx = 0; guideV = true }
+      if (Math.abs(ny) <= SNAP) { ny = 0; guideH = true }
+    }
+    offsetX = nx; offsetY = ny
     dispatch('change', { zoom, offsetX, offsetY })
   }
-  function up() { dragging = false }
+  function up() { dragging = false; guideV = guideH = false }
   function wheel(e) {
     if (!interactive) return
     e.preventDefault()
@@ -90,7 +104,9 @@
   {#if bakedUrl}
     <img class="baked" class:show={showBaked} src={bakedUrl} alt="" draggable="false" />
   {/if}
-  {#if interactive}<div class="hint">drag to move · scroll to zoom</div>{/if}
+  {#if guideV}<div class="guide v"></div>{/if}
+  {#if guideH}<div class="guide h"></div>{/if}
+  {#if interactive}<div class="hint">drag to move · scroll to zoom · ⇧ lock axis</div>{/if}
 </div>
 
 <style>
@@ -100,6 +116,9 @@
   .media { position: absolute; user-select: none; pointer-events: none; }
   .baked { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity 0.18s ease; pointer-events: none; }
   .baked.show { opacity: 1; }
+  .guide { position: absolute; background: var(--accent); pointer-events: none; box-shadow: 0 0 4px var(--accent); }
+  .guide.v { top: 0; bottom: 0; left: 50%; width: 2px; transform: translateX(-1px); }
+  .guide.h { left: 0; right: 0; top: 50%; height: 2px; transform: translateY(-1px); }
   .hint { position: absolute; bottom: 6px; left: 0; right: 0; text-align: center; font-size: 11px; color: var(--muted); background: rgba(0,0,0,0.35); padding: 2px; pointer-events: none; }
   .checker {
     background-color: #2b2d31;

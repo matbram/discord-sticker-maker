@@ -51,6 +51,7 @@
   let progress = { stage: '', message: '', done: null, total: null }
   let outputs = [] // [{type, format, meta}]
   let previewBg = 'checker'
+  let snapAxis = false // snap pan to center axes (guide lines)
   let error = { message: '', requestId: '' }
   let closeStream = null
   let watchdogTimer = null
@@ -276,7 +277,7 @@
                               fitMode={fr.fit_mode} padding={params.padding}
                               zoom={fr.zoom} offsetX={fr.offset_x} offsetY={fr.offset_y}
                               trimStart={params.trim_start_s} trimLen={params.max_duration_s}
-                              bakedUrl={focusBaked} {previewBg} {busy} maxW={400} maxH={400}
+                              bakedUrl={focusBaked} {previewBg} {busy} snap={snapAxis} maxW={400} maxH={400}
                               on:change={onCropChange} />
             </div>
           {/if}
@@ -313,6 +314,8 @@
             <button class:on={fr.fit_mode === 'fill'} on:click={() => setFit('fill')}>Fill</button>
           </div>
         </div>
+        <label class="toggle"><span>Snap pan to center</span><input type="checkbox" checked={snapAxis} on:change={() => (snapAxis = !snapAxis)} /></label>
+        <p class="muted-line">Snap shows center guides; hold ⇧ while dragging to lock to one axis.</p>
         <label class="toggle"><span>Cut out background</span><input type="checkbox" checked={params.remove_bg} on:change={toggleBg} /></label>
 
         {#if focusedType === 'gif'}
