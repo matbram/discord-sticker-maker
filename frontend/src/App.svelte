@@ -174,8 +174,16 @@
     if (!anySelected) { selected = { ...selected, [id]: true }; return } // keep at least one
     if (view === 'done') scheduleRegen()
   }
-  function onCropChange(e) { framing = { ...framing, [focusedType]: { ...framing[focusedType], zoom: e.detail.zoom, offset_x: e.detail.offsetX, offset_y: e.detail.offsetY } }; scheduleRegen() }
-  function setFit(m) { framing = { ...framing, [focusedType]: { zoom: 1, offset_x: 0, offset_y: 0, fit_mode: m } }; scheduleRegen() }
+  // Sticker & emote share one locked framing (both are square crops); gif is independent.
+  const LINKED = ['sticker', 'emoji']
+  function applyFraming(patch) {
+    const keys = LINKED.includes(focusedType) ? LINKED : [focusedType]
+    const next = { ...framing }
+    for (const k of keys) next[k] = { ...framing[k], ...patch }
+    framing = next
+  }
+  function onCropChange(e) { applyFraming({ zoom: e.detail.zoom, offset_x: e.detail.offsetX, offset_y: e.detail.offsetY }); scheduleRegen() }
+  function setFit(m) { applyFraming({ zoom: 1, offset_x: 0, offset_y: 0, fit_mode: m }); scheduleRegen() }
   function setPriority(p) { params = { ...params, priority: p }; scheduleRegen() }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
@@ -308,7 +316,7 @@
       <!-- sidebar: shared edits + focused controls + downloads -->
       <aside class="side">
         <h3>Edit</h3>
-        <div class="ctl"><span class="ctl-label">Framing · {focusMeta.label}</span>
+        <div class="ctl"><span class="ctl-label">Framing · {LINKED.includes(focusedType) ? 'Sticker + Emote (linked)' : focusMeta.label}</span>
           <div class="seg small">
             <button class:on={fr.fit_mode === 'fit'} on:click={() => setFit('fit')}>Fit</button>
             <button class:on={fr.fit_mode === 'fill'} on:click={() => setFit('fill')}>Fill</button>
