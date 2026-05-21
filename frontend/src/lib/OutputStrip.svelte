@@ -47,6 +47,7 @@
       </div>
       <div class="mini-label"><span class="me">{t.emoji}</span> {t.label}</div>
       {#if o}<div class="mini-meta">{o.meta.width}×{o.meta.height} · {fmtBytes(o.meta.bytes)}{o.meta.animated ? ` · ${o.meta.frames}f` : ''}</div>{/if}
+      <div class="mini-edit">{focusedType === t.id ? '● Editing' : '✎ Edit'}</div>
     </button>
   {/each}
 </div>
@@ -61,4 +62,7 @@
   .mini-label { font-size: 12px; font-weight: 600; color: var(--text); }
   .mini-label .me { font-size: 14px; }
   .mini-meta { font-size: 10px; color: var(--muted-2); }
+  .mini-edit { font-size: 10px; font-weight: 700; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .mini:hover .mini-edit { border-color: var(--accent); color: var(--text); }
+  .mini.focused .mini-edit { background: var(--accent); color: #fff; border-color: var(--accent); }
 </style>

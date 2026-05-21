@@ -24,20 +24,16 @@
 
   function emit() { dispatch('change', { start: +start.toFixed(2), length: +length.toFixed(2) }) }
 
-  function clampWindow() {
-    if (duration > 0) {
-      length = clamp(length, MIN_LEN, Math.min(MAX_LEN, duration))
-      start = clamp(start, 0, Math.max(0, duration - MIN_LEN))
-      if (start + length > duration) length = duration - start
-    }
-  }
-
-  function onMeta() { duration = videoEl?.duration || 0; clampWindow(); emit() }
+  // Learn the source duration only for the track scale; NEVER emit on mount. Auto-
+  // emitting a clamped value used to silently trim the clip to a sliver (e.g. a GIF
+  // whose duration was read too early came back as 0.38s). Trim only changes when the
+  // user drags a handle.
+  function onMeta() { duration = videoEl?.duration || 0 }
 
   onMount(async () => {
     if (isVideo) return
     const d = await imageDuration(src, mimeType)
-    if (d > 0) { duration = d; clampWindow(); emit() }
+    if (d > 0) duration = d
   })
 
   async function imageDuration(url, type) {
@@ -45,13 +41,16 @@
     try {
       const buf = await (await fetch(url)).arrayBuffer()
       const dec = new ImageDecoder({ data: buf, type: type || 'image/gif' })
-      await dec.tracks.ready
+      await dec.completed            // all frames buffered -> frameCount is final
       const track = dec.tracks.selectedTrack
       const count = track?.frameCount || 1
-      const { image, duration: d0 } = await dec.decode({ frameIndex: 0 })
-      const per = (d0 || 100000) / 1e6 // µs → s (default 100ms/frame)
-      image.close()
-      return per * count
+      let total = 0                  // sum the real per-frame durations (µs)
+      for (let i = 0; i < count; i++) {
+        const { image, duration: d } = await dec.decode({ frameIndex: i })
+        total += d || 0
+        image.close()
+      }
+      return total > 0 ? total / 1e6 : count * 0.1
     } catch (_) { return 0 }
   }
 
@@ -76,8 +75,12 @@
   function onStartInput() { start = clamp(start, 0, MAX_LEN); emit() }
   function onLenInput() { length = clamp(length, MIN_LEN, MAX_LEN); emit() }
 
-  $: pct = duration > 0 ? { left: (start / duration) * 100, width: (length / duration) * 100 } : null
-  $: end = start + length
+  // Display values clamp the (un-emitted) trim into the known duration so the handles
+  // never overflow the track; the real start/length only change on user drag.
+  $: dStart = duration > 0 ? clamp(start, 0, Math.max(0, duration - MIN_LEN)) : start
+  $: dLen = duration > 0 ? clamp(length, MIN_LEN, Math.max(MIN_LEN, duration - dStart)) : length
+  $: pct = duration > 0 ? { left: (dStart / duration) * 100, width: (dLen / duration) * 100 } : null
+  $: end = dStart + dLen
 </script>
 
 {#if isVideo}
@@ -95,8 +98,8 @@
       </div>
     </div>
     <div class="times">
-      <span>{start.toFixed(1)}s</span>
-      <span class="len">{length.toFixed(1)}s clip</span>
+      <span>{dStart.toFixed(1)}s</span>
+      <span class="len">{dLen.toFixed(1)}s clip</span>
       <span>{end.toFixed(1)}s</span>
     </div>
   {:else}

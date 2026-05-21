@@ -90,7 +90,7 @@
     source = { file }
     sourceIsVideo = (file.type || '').startsWith('video/')
     sourceUrl = URL.createObjectURL(file)
-    params = { ...params, zoom: 1, offset_x: 0, offset_y: 0, trim_start_s: 0 }
+    params = { ...params, zoom: 1, offset_x: 0, offset_y: 0, trim_start_s: 0, max_duration_s: 4.0 }
     analyze()
     view = 'choosing'
   }
@@ -100,7 +100,7 @@
     source = { url }
     sourceIsVideo = /\.(mp4|mov|webm|mkv|avi)(\?|$)/i.test(url)
     sourceUrl = url
-    params = { ...params, zoom: 1, offset_x: 0, offset_y: 0, trim_start_s: 0 }
+    params = { ...params, zoom: 1, offset_x: 0, offset_y: 0, trim_start_s: 0, max_duration_s: 4.0 }
     analyze()
     view = 'choosing'
   }
@@ -307,7 +307,7 @@
         </div>
 
         <div class="strip-card">
-          <div class="strip-head"><span>Your outputs</span><span class="muted-line">edits apply to all — click one to preview it big</span></div>
+          <div class="strip-head"><span>Your outputs</span><span class="muted-line">click a format to edit it · shared edits apply to all</span></div>
           <OutputStrip types={TYPES} {selected} {focusedType} {params}
                        src={sourceUrl} isVideo={sourceIsVideo} naturalW={sourceW} naturalH={sourceH}
                        {outputs} {jobId} {previewBg} {busy} on:focus={focusOutput} />
