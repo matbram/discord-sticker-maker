@@ -80,8 +80,8 @@
   function analyze() {
     loadDims(sourceUrl, sourceIsVideo)
     sourceAnimated = sourceIsVideo || /\.gif(\?|$)/i.test(source.file?.name || source.url || '') || (source.file?.type === 'image/gif')
-    // sensible default selection + recommendations
-    selected = { sticker: true, emoji: false, gif: !!sourceAnimated }
+    // make everything by default — the editor lets them toggle outputs off
+    selected = { sticker: true, emoji: true, gif: true }
   }
 
   function pickFiles(list) {
@@ -93,7 +93,7 @@
     sourceUrl = URL.createObjectURL(file)
     params = { ...params, zoom: 1, offset_x: 0, offset_y: 0, trim_start_s: 0, max_duration_s: 4.0 }
     analyze()
-    view = 'choosing'
+    create()
   }
   function submitUrl() {
     const url = urlInput.trim(); if (!url) return
@@ -103,7 +103,7 @@
     sourceUrl = url
     params = { ...params, zoom: 1, offset_x: 0, offset_y: 0, trim_start_s: 0, max_duration_s: 4.0 }
     analyze()
-    view = 'choosing'
+    create()
   }
 
   function buildOutputs() {
@@ -117,7 +117,7 @@
   function firstSelected() { return TYPES.find((t) => selected[t.id])?.id || 'sticker' }
   $: if (!selected[focusedType]) focusedType = firstSelected()
 
-  function create() { if (!anySelected) return; focusedType = firstSelected(); view = 'working'; run() }
+  function create() { if (!(selected.sticker || selected.emoji || selected.gif)) return; focusedType = firstSelected(); view = 'working'; run() }
 
   async function run() {
     if (!source || !anySelected) return
@@ -240,28 +240,6 @@
         <input type="url" placeholder="https://…/clip.mp4" bind:value={urlInput} />
         <button type="submit" class="primary-btn" disabled={!urlInput.trim()}>Continue</button>
       </form>
-    </section>
-
-  {:else if view === 'choosing'}
-    <section class="choose">
-      <h2>What do you want to make?</h2>
-      <p class="sub">Pick one or several — we make them all from this one file.</p>
-      <div class="type-cards">
-        {#each TYPES as t}
-          {@const rec = t.id === 'sticker' || (t.id === 'gif' && sourceAnimated) || (t.id === 'emoji' && !sourceAnimated)}
-          <button class="type-card" class:on={selected[t.id]} on:click={() => toggleOutput(t.id)}>
-            <span class="t-emoji">{t.emoji}</span>
-            <span class="t-label">{t.label}</span>
-            <span class="t-blurb">{t.blurb}</span>
-            {#if rec}<span class="t-rec">Recommended</span>{/if}
-            <span class="t-check">{selected[t.id] ? '✓' : '+'}</span>
-          </button>
-        {/each}
-      </div>
-      <div class="choose-actions">
-        <button class="ghost-btn" on:click={() => (selected = { sticker: true, emoji: true, gif: true })}>Make all three</button>
-        <button class="primary-btn big" on:click={create} disabled={!anySelected}>Create {Object.values(selected).filter(Boolean).length} →</button>
-      </div>
     </section>
 
   {:else if view === 'working'}
@@ -422,20 +400,7 @@
   .primary-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .primary-btn.big { width: 100%; padding: 13px; font-size: 15px; }
 
-  .choose { text-align: center; padding: 24px 0; }
-  .choose h2 { font-size: 26px; margin: 0 0 6px; }
-  .type-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; max-width: 720px; margin: 24px auto; }
-  @media (max-width: 680px) { .type-cards { grid-template-columns: 1fr; } }
-  .type-card { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 26px 14px; background: var(--surface); border: 2px solid var(--border); border-radius: var(--radius-lg); color: var(--muted); transition: all 0.15s ease; }
-  .type-card:hover { border-color: var(--accent); color: var(--text); }
-  .type-card.on { border-color: var(--accent); background: var(--accent-soft); color: #fff; }
   .t-emoji { font-size: 30px; }
-  .t-label { font-weight: 700; font-size: 16px; }
-  .t-blurb { font-size: 12px; color: var(--muted-2); }
-  .t-rec { font-size: 11px; color: var(--accent); font-weight: 700; margin-top: 4px; }
-  .t-check { position: absolute; top: 10px; right: 12px; font-weight: 800; color: var(--accent); }
-  .type-card.on .t-check { color: #fff; }
-  .choose-actions { display: flex; gap: 12px; justify-content: center; align-items: center; max-width: 720px; margin: 0 auto; }
 
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 40px; text-align: center; max-width: 540px; margin: 40px auto; box-shadow: var(--shadow); }
   .processing h2 { margin: 6px 0 4px; font-size: 20px; }
