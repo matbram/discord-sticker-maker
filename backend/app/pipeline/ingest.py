@@ -12,7 +12,8 @@ from ..observability import get_logger
 
 log = get_logger("ingest")
 
-MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024  # hard cap on remote input
+MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024  # hard cap on remote (URL) input
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024     # hard cap on direct uploads
 MAX_REDIRECTS = 5
 
 
@@ -69,6 +70,11 @@ def kind_for_mime(mime: str) -> str:
 def from_bytes(data: bytes, filename: str | None = None) -> Source:
     if not data:
         raise IngestError("Empty input")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise IngestError(
+            f"File too large ({len(data) // (1024 * 1024)} MB) — the max is "
+            f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB. Try a shorter or lower-resolution GIF."
+        )
     mime = sniff_mime(data)
     kind = kind_for_mime(mime)
     log.info("ingest.upload", mime=mime, kind=kind, bytes=len(data), filename=filename)

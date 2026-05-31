@@ -179,6 +179,45 @@ def _palette_apng(frames, delays, colors, zlevel: int = 0):
     return _assemble_apng(pngs, delays, zlevel) if pngs is not None else None
 
 
+RGBA_FRAME_FLOOR = 6  # don't drop a truecolor sticker below this many frames
+
+
+def _rgba_fit_by_frames(frames, delays, budget, zlevel: int = 1, floor: int = RGBA_FRAME_FLOOR):
+    """Largest frame count whose *truecolor* RGBA APNG fits ``budget``.
+
+    Truecolor (PNG color type 6) has no shared palette, so colors are never
+    banded/washed out — the only lever is the frame count. We measure the full
+    encode, estimate how many frames fit, and keep the most that do. Returns
+    ``(data, frames, delays)`` or ``None`` if even ``floor`` frames won't fit
+    (caller then falls back to a palette)."""
+    full = _rgba_apng(frames, delays, zlevel)
+    if len(full) <= budget:
+        return full, frames, delays
+    n = len(frames)
+    if n <= floor:
+        return None
+    per = len(full) / max(n, 1)
+    est = int(budget / per * 0.95) if per > 0 else floor
+    seen: set[int] = set()
+    for target in (est, int(n * 0.66), n // 2, n // 3, floor):
+        target = max(floor, min(n - 1, int(target)))
+        if target in seen:
+            continue
+        seen.add(target)
+        f2, d2 = even_subsample(frames, delays, target)
+        data = _rgba_apng(f2, d2, zlevel)
+        if len(data) <= budget:
+            return data, f2, d2
+    return None
+
+
+def _rgba_smallest(frames, delays, zlevel: int = 1):
+    """Last-resort truecolor encode at the frame floor (used when pngquant is
+    unavailable and the full clip is over budget)."""
+    f2, d2 = even_subsample(frames, delays, min(len(frames), RGBA_FRAME_FLOOR))
+    return _rgba_apng(f2, d2, zlevel), f2, d2
+
+
 def _write_frames(frames, td) -> None:
     for i, arr in enumerate(frames):
         Image.fromarray(arr, "RGBA").save(os.path.join(td, f"f{i:05d}.png"), "PNG")
@@ -278,34 +317,37 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
     have_pq = _pngquant_available()
     priority = getattr(params, "priority", "balanced")
     priority = priority.value if hasattr(priority, "value") else priority
-    # "smooth" wants max frames AND colour: pay for 7zip (-z1) so the smaller files
-    # let a higher palette (or RGBA) fit at the same frame count. Others stay on zlib.
-    zlevel = 1 if priority == "smooth" else 0
 
     def done(data, fr, de):
         return data, "APNG", len(fr), _avg_fps(de)
 
-    # No pngquant: only lever is frame count (rgba).
-    if not have_pq:
-        best = None
-        for div in (1, 2, 3, 4):
-            f2, d2 = (frames, delays) if div == 1 else even_subsample(frames, delays, max(8, len(frames) // div))
-            data = _rgba_apng(f2, d2, zlevel)
-            if best is None or len(data) < len(best[0]):
-                best = (data, f2, d2)
-            if len(data) <= budget:
-                return done(data, f2, d2)
-        return done(best[0], best[1], best[2])
+    # "Richer"/sharp (the sticker default) and the no-pngquant case keep colors:
+    # encode truecolor RGBA — which has no shared palette and so can never band or
+    # wash out — and drop frames to fit. 7zip (-z1) squeezes more frames under
+    # budget before any are cut.
+    if priority == "sharp" or not have_pq:
+        fit = _rgba_fit_by_frames(frames, delays, budget, zlevel=1)
+        if fit is not None:
+            return done(*fit)
+        if not have_pq:  # no quantizer available -> ship the smallest truecolor clip
+            return done(*_rgba_smallest(frames, delays))
+        # Truecolor won't fit even at the frame floor (very high-entropy clip):
+        # fall through to the shared-palette ladder below as a last resort.
 
-    # Per-priority minimum palette. "smooth" favors frames but never drops below 24
-    # colors — an 8-colour shared palette is what made smooth output look sepia.
+    # Palette path: one shared palette, now up to 256 colors (the old top of 128
+    # is what left dense GIFs looking flat). Used by "smooth" (keep frames, spend
+    # the budget on colors) and "balanced", plus sharp's extreme fallback.
     floor = {"smooth": 24, "balanced": 32, "sharp": 64}.get(priority, 32)
-    ladder = [c for c in (128, 64, 32, 16, 8) if floor <= c <= params.max_colors] or [max(8, min(params.max_colors, 64))]
+    ladder = [c for c in (256, 128, 64, 32, 16, 8) if floor <= c <= params.max_colors] \
+        or [max(8, min(params.max_colors, 256))]
+    # smooth/sharp pay for 7zip so the smaller files buy more colors or frames.
+    zlevel = 1 if priority in ("smooth", "sharp") else 0
 
     # One probe at the floor color, full frames, tells us how big things are.
     probe = _palette_apng(frames, delays, floor, zlevel)
-    if probe is None:
-        return done(_rgba_apng(frames, delays, zlevel), frames, delays)
+    if probe is None:  # pngquant hiccup -> truecolor with frame drop
+        fit = _rgba_fit_by_frames(frames, delays, budget, zlevel=1)
+        return done(*(fit or _rgba_smallest(frames, delays)))
     log.info("encode.probe", colors=floor, frames=len(frames), bytes=len(probe), priority=priority)
     BIG = 1_000_000  # rgba sentinel for "max quality"
 
@@ -319,10 +361,10 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
             return done(max(scored, key=lambda x: x[0])[1], frames, delays)
         return done(probe, frames, delays)
 
-    # Too big at full frames (or sharp): pick a frame count from the probe, then try
-    # colors at that count in parallel and keep the highest that fits.
+    # Too big at full frames (or sharp fallback): pick a frame count from the probe,
+    # then try colors at that count in parallel and keep the highest that fits.
     per = len(probe) / max(len(frames), 1)
-    target = min(len(frames), max(8, int(budget / per * 0.9))) if len(probe) > budget else len(frames)
+    target = min(len(frames), max(6, int(budget / per * 0.9))) if len(probe) > budget else len(frames)
     f2, d2 = even_subsample(frames, delays, target)
     res = _run_parallel([(lambda c=c: _palette_apng(f2, d2, c, zlevel)) for c in ladder])
     for c, d in zip(ladder, res):

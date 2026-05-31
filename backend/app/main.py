@@ -87,6 +87,13 @@ async def process(
 
     try:
         if file is not None:
+            if file.size is not None and file.size > ingest.MAX_UPLOAD_BYTES:
+                limit_mb = ingest.MAX_UPLOAD_BYTES // (1024 * 1024)
+                log.warning("process.upload_too_large", size=file.size)
+                return JSONResponse(
+                    {"error": f"File too large — the max is {limit_mb} MB.", "request_id": request_id},
+                    status_code=413,
+                )
             data = await file.read()
             source = ingest.from_bytes(data, file.filename)
         elif url:

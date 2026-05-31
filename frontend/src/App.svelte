@@ -19,7 +19,7 @@
       remove_bg: false, bg_model: 'auto', auto_crop: true, fit_mode: 'fill',
       zoom: 1.0, offset_x: 0.0, offset_y: 0.0, padding: 0.06,
       max_fps: 18, max_duration_s: 4.0, trim_start_s: 0.0,
-      priority: 'balanced', max_colors: 256, gif_quality: 'balanced', gif_aspect: 'source'
+      priority: 'sharp', max_colors: 256, gif_quality: 'balanced', gif_aspect: 'source'
     }
   }
 
@@ -36,7 +36,7 @@
   let sourceW = 0
   let sourceH = 0
 
-  let selected = { gif: true, sticker: true, emoji: true }
+  let selected = { gif: false, sticker: true, emoji: false }
   let focusedType = 'gif'
   // Per-output framing (pan/zoom/fit); sticker & emote stay locked, gif is independent.
   function defaultFraming() {
@@ -89,7 +89,7 @@
     loadDims(sourceUrl, sourceIsVideo)
     sourceAnimated = sourceIsVideo || /\.gif(\?|$)/i.test(source.file?.name || source.url || '') || (source.file?.type === 'image/gif')
     // make everything by default — the editor lets them toggle outputs off
-    selected = { gif: true, sticker: true, emoji: true }
+    selected = { gif: false, sticker: true, emoji: false }
   }
 
   function pickFiles(list) {

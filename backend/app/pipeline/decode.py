@@ -14,7 +14,7 @@ import tempfile
 from dataclasses import dataclass
 
 import numpy as np
-from PIL import Image, ImageSequence
+from PIL import Image
 
 try:
     import pillow_heif
@@ -26,6 +26,7 @@ except Exception:  # noqa: BLE001
 
 from ..models import MAX_ANIM_FRAMES
 from ..observability import get_logger
+from .encode import even_subsample
 from .ingest import IngestError, InputKind, Source
 
 log = get_logger("decode")
@@ -46,53 +47,65 @@ def _to_rgba(img: Image.Image) -> np.ndarray:
     return np.asarray(img.convert("RGBA"), dtype=np.uint8)
 
 
-def _slice_by_time(frames: list[np.ndarray], delays: list[int],
-                   trim_start_s: float, max_duration_s: float | None) -> tuple[list[np.ndarray], list[int]]:
-    """Keep only the frames whose playback window intersects
-    ``[trim_start, trim_start + max_duration]``; clip the edge delays. This lets
-    animated images (GIF/APNG/WebP) honor the same trim controls as video."""
-    if not frames or max_duration_s is None:
-        return frames, delays
-    start_ms = max(0.0, float(trim_start_s) * 1000.0)
-    end_ms = start_ms + max(0.0, float(max_duration_s)) * 1000.0
-    out_f: list[np.ndarray] = []
-    out_d: list[int] = []
-    t = 0.0
-    for f, d in zip(frames, delays):
-        d = max(1, int(d))
-        seg_start, seg_end = t, t + d
-        if seg_start < end_ms and seg_end > start_ms:
-            clipped = min(seg_end, end_ms) - max(seg_start, start_ms)
-            out_f.append(f)
-            out_d.append(max(1, int(round(clipped))))
-        t = seg_end
-        if t >= end_ms:
-            break
-    if not out_f:  # trim window starts past the clip -> show the last frame
-        return [frames[-1]], [max(1, int(delays[-1]))]
-    return out_f, out_d
-
-
 def _decode_image(data: bytes, max_duration_s: float | None = None, trim_start_s: float = 0.0) -> Frames:
+    """Decode a static or animated image to RGBA frames + per-frame delays.
+
+    For animated images we seek to the trim window *first*, then evenly sample it
+    down to ``MAX_ANIM_FRAMES`` before converting. This means:
+      - a trim window anywhere in a long GIF is honored (the old code only ever
+        looked at the first ~80 source frames, so a later window froze to one
+        frame), and
+      - we never build more than ``MAX_ANIM_FRAMES`` RGBA arrays, so memory is
+        bounded no matter how long the source is.
+    """
     import io
 
     img = Image.open(io.BytesIO(data))
     animated = bool(getattr(img, "is_animated", False)) and getattr(img, "n_frames", 1) > 1
 
     if not animated:
-        arr = _to_rgba(img)
-        return Frames(frames=[arr], delays_ms=[0], animated=False)
+        return Frames(frames=[_to_rgba(img)], delays_ms=[0], animated=False)
+
+    n = int(getattr(img, "n_frames", 1))
+    start_ms = max(0.0, float(trim_start_s) * 1000.0)
+    end_ms = start_ms + max(0.0, float(max_duration_s)) * 1000.0 if max_duration_s else float("inf")
+
+    # Pass 1: walk frame durations only (cheap — no RGBA), collecting the indices
+    # whose playback window intersects [start, end]. Stop once we're past the
+    # window so trimming a 4s clip out of a 5-minute GIF costs ~4s of seeking.
+    t = 0.0
+    win_idx: list[int] = []
+    win_delays: list[int] = []
+    last_d = DEFAULT_FRAME_DELAY_MS
+    for i in range(n):
+        img.seek(i)
+        last_d = int(img.info.get("duration", DEFAULT_FRAME_DELAY_MS)) or DEFAULT_FRAME_DELAY_MS
+        seg_start, seg_end = t, t + last_d
+        if seg_start < end_ms and seg_end > start_ms:
+            clipped = min(seg_end, end_ms) - max(seg_start, start_ms)
+            win_idx.append(i)
+            win_delays.append(max(1, int(round(clipped))))
+        t = seg_end
+        if t >= end_ms:
+            break
+
+    if not win_idx:  # window starts past the end of the clip -> last frame, static
+        img.seek(n - 1)
+        return Frames(frames=[_to_rgba(img)], delays_ms=[max(1, last_d)], animated=False)
+
+    # Sample down to MAX_ANIM_FRAMES (duration-preserving) BEFORE converting, so
+    # only the kept indices are ever turned into RGBA arrays.
+    if len(win_idx) > MAX_ANIM_FRAMES:
+        win_idx, win_delays = even_subsample(win_idx, win_delays, MAX_ANIM_FRAMES)
 
     frames: list[np.ndarray] = []
-    delays: list[int] = []
-    for frame in ImageSequence.Iterator(img):
-        frames.append(_to_rgba(frame))
-        delays.append(int(frame.info.get("duration", DEFAULT_FRAME_DELAY_MS)) or DEFAULT_FRAME_DELAY_MS)
-        if len(frames) >= MAX_FRAMES:
-            break
-    frames, delays = _slice_by_time(frames, delays, trim_start_s, max_duration_s)
-    log.info("decode.image_animated", frames=len(frames), trim_start_s=trim_start_s, max_duration_s=max_duration_s)
-    return Frames(frames=frames, delays_ms=delays, animated=len(frames) > 1)
+    for i in win_idx:
+        img.seek(i)
+        frames.append(_to_rgba(img))
+
+    log.info("decode.image_animated", source_frames=n, kept=len(frames),
+             trim_start_s=trim_start_s, max_duration_s=max_duration_s)
+    return Frames(frames=frames, delays_ms=list(win_delays), animated=len(frames) > 1)
 
 
 def _decode_video(data: bytes, max_fps: int, max_duration_s: float, trim_start_s: float) -> Frames:
