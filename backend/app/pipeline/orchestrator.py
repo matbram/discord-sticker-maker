@@ -70,10 +70,36 @@ def _decode_and_matte(source: Source, params, emit: EmitFn) -> dict:
             "has_alpha": has_alpha, "bg_note": bg_note}
 
 
+def _encode_square_anim(fitted, de, eff, prof) -> tuple[bytes, str, int, float | None]:
+    """Encode an animated square sticker as APNG, GIF, or — for 'auto'/max-quality —
+    BOTH, keeping whichever is smallest while valid (≤512KB). The GIF↔APNG winner is
+    content-dependent (APNG keeps truecolor; GIF can be smaller on flat/long clips),
+    so racing both is the only way to reliably pick the better file per clip."""
+    want = prof["animated_format"]  # "APNG" | "GIF" | "BOTH"
+    budget = prof["budget"]
+    cands: list[tuple[bytes, str, int, float | None]] = []
+    if want in ("APNG", "BOTH"):
+        cands.append(encode.encode_animated(fitted, de, eff))
+    if want in ("GIF", "BOTH"):
+        cands.append(encode.encode_gif(
+            fitted, de, budget=budget, max_colors=eff.max_colors, fps_cap=prof.get("fps_cap", 30)))
+    if not cands:  # shouldn't happen; defensive
+        return encode.encode_animated(fitted, de, eff)
+    fits = [c for c in cands if len(c[0]) <= prof["hard_limit"]]
+    pool = fits or cands
+    # Prefer the most frames; break ties by smaller bytes (more headroom = higher quality).
+    best = max(pool, key=lambda c: (c[2], -len(c[0])))
+    if len(cands) > 1:
+        log.info("orchestrator.format_race",
+                 picked=best[1], **{c[1].lower(): len(c[0]) for c in cands})
+    return best
+
+
 def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str, StickerMeta]]:
     specs = [(_v(o.type), _v(o.gif_quality), o) for o in (params.outputs or [])]
+    qmode = _v(params.quality_mode)
     profiles = {
-        t: profile_for(t, gq, _v(o.sticker_format) or _v(params.sticker_format))
+        t: profile_for(t, gq, _v(o.sticker_format) or _v(params.sticker_format), qmode)
         for t, gq, o in specs
     }
 
@@ -112,11 +138,8 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
             if prof["square"]:
                 fitted = crop_fit.fit_square(fr, eff, has_alpha, prof["size"])
                 w = h = prof["size"]
-                if is_anim and prof["animated_format"] == "APNG":
-                    data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
-                elif is_anim and prof["animated_format"] == "GIF":
-                    data, fmt, n_frames, fps = encode.encode_gif(
-                        fitted, de, budget=prof["budget"], max_colors=eff.max_colors, fps_cap=prof.get("fps_cap", 30))
+                if is_anim:
+                    data, fmt, n_frames, fps = _encode_square_anim(fitted, de, eff, prof)
                 else:
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None

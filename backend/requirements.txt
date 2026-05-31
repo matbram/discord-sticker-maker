@@ -9,3 +9,4 @@ onnxruntime>=1.17
 httpx>=0.27
 structlog>=24.1
 apng>=0.3.4
+pyoxipng>=9.0  # final lossless APNG deflate squeeze (in-process oxipng)

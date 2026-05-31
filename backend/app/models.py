@@ -60,8 +60,18 @@ class StickerFormat(str, Enum):
     # Discord's sticker uploader accepts APNG, PNG, JPG and GIF (320x320, <=512KB).
     #   gif  -> per-frame palettes keep all frames smooth & colorful (1-bit alpha)
     #   apng -> soft 8-bit transparency; best when the background was cut out
+    #   auto -> encode BOTH and keep whichever looks best under 512KB (export only)
     gif = "gif"
     apng = "apng"
+    auto = "auto"
+
+
+class QualityMode(str, Enum):
+    # fast  -> single quick encode for the interactive preview (current behavior)
+    # max   -> the slow "maximize quality" export: race candidates / both formats,
+    #          run the zopfli/oxipng/gifsicle final squeezes, keep the best under budget
+    fast = "fast"
+    max = "max"
 
 
 # Per-output Discord profiles. Square types resize to (size, size); gif keeps
@@ -74,14 +84,19 @@ GIF_PROFILES = {
 
 
 def profile_for(output_type: str, gif_quality: str = "balanced",
-                sticker_format: str = "apng") -> dict:
+                sticker_format: str = "apng", quality_mode: str = "fast") -> dict:
     if output_type == "sticker":
-        # Discord accepts both GIF and APNG stickers at 320x320 / <=512KB. GIF is
-        # the default: per-frame palettes keep every frame smooth & colorful, so
-        # nothing gets dropped for color. APNG is offered for cut-out subjects that
-        # need soft (8-bit) edges instead of GIF's 1-bit on/off transparency.
+        # Discord accepts both GIF and APNG stickers at 320x320 / <=512KB.
+        #   apng -> truecolor, soft 8-bit alpha (best default, no color washout)
+        #   gif  -> per-frame palettes; can be smaller on flat/long clips, 1-bit alpha
+        #   auto -> race BOTH and keep the best valid file (only in max-quality export)
         sf = sticker_format.value if hasattr(sticker_format, "value") else sticker_format
-        animated = "GIF" if sf == "gif" else "APNG"
+        if sf == "gif":
+            animated = "GIF"
+        elif sf == "auto" and quality_mode == "max":
+            animated = "BOTH"
+        else:
+            animated = "APNG"  # 'auto' in fast preview defaults to APNG (truecolor)
         return {"square": True, "size": 320, "animated_format": animated, "static_format": "PNG",
                 "budget": TARGET_BYTES, "hard_limit": DISCORD_MAX_BYTES, "frame_cap": 60,
                 "fps_cap": 30}
@@ -140,6 +155,7 @@ class ProcessParams(BaseModel):
     trim_start_s: float = Field(0.0, ge=0.0)
     priority: Priority = Priority.balanced
     sticker_format: StickerFormat = StickerFormat.apng
+    quality_mode: QualityMode = QualityMode.fast  # "max" = slow best-quality export
 
     # encoding defaults (per-output may override)
     max_bytes: int = Field(TARGET_BYTES, ge=10 * 1024, le=DISCORD_MAX_BYTES)

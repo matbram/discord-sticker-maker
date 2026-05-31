@@ -20,7 +20,7 @@
       zoom: 1.0, offset_x: 0.0, offset_y: 0.0, padding: 0.06,
       max_fps: 18, max_duration_s: 4.0, trim_start_s: 0.0,
       priority: 'balanced', max_colors: 256, gif_quality: 'balanced', gif_aspect: 'source',
-      sticker_format: 'apng'
+      sticker_format: 'apng', quality_mode: 'fast'
     }
   }
 
@@ -151,7 +151,10 @@
     }
   }
 
-  function scheduleRegen() { persistParams(); clearTimeout(regenTimer); regenTimer = setTimeout(() => { if (busy) pendingRegen = true; else run() }, 500) }
+  // Interactive edits always use the fast single-encode path; "Maximize quality" is
+  // an explicit one-shot that races both formats + runs the slow zopfli/oxipng passes.
+  function scheduleRegen() { if (params.quality_mode !== 'fast') params = { ...params, quality_mode: 'fast' }; persistParams(); clearTimeout(regenTimer); regenTimer = setTimeout(() => { if (busy) pendingRegen = true; else run() }, 500) }
+  function maximizeQuality() { if (busy) return; params = { ...params, quality_mode: 'max' }; run() }
 
   function onEvent(evt) {
     armWatchdog()
@@ -360,11 +363,12 @@
         {:else if focusOut?.meta.animated}
           {#if focusedType === 'sticker'}
             <div class="ctl"><span class="ctl-label">Sticker format</span>
-              <div class="seg small">
+              <div class="seg three">
                 <button class:on={params.sticker_format === 'apng'} on:click={() => setStickerFormat('apng')}>APNG</button>
                 <button class:on={params.sticker_format === 'gif'} on:click={() => setStickerFormat('gif')}>GIF</button>
+                <button class:on={params.sticker_format === 'auto'} on:click={() => setStickerFormat('auto')}>Auto</button>
               </div>
-              <p class="muted-line">{params.sticker_format === 'apng' ? 'Full color (truecolor) — best quality for most stickers.' : 'Smaller files & max compatibility, but capped at 256 colors.'}</p>
+              <p class="muted-line">{params.sticker_format === 'apng' ? 'Full color (truecolor) — best quality for most stickers.' : params.sticker_format === 'gif' ? 'Smaller files & max compatibility, but capped at 256 colors.' : 'Try both on export and keep whichever looks best under 512 KB.'}</p>
             </div>
           {/if}
           {#if !(focusedType === 'sticker' && params.sticker_format === 'apng')}
@@ -406,6 +410,12 @@
           {#if focusOut.meta.notes?.length}<div class="onote">{focusOut.meta.notes[0]}</div>{/if}
         {/if}
 
+        {#if focusOut?.meta.animated}
+          <button class="ghost-btn full" on:click={maximizeQuality} disabled={busy}>
+            {params.quality_mode === 'max' && !busy ? '✓ Quality maximized' : '✨ Maximize quality (slower)'}
+          </button>
+          <p class="muted-line">Re-encodes with the slow high-quality pass (zopfli + best encoders, both formats) to fit the most frames &amp; color under 512 KB.</p>
+        {/if}
         <button class="primary-btn big" on:click={() => download(focusedType)} disabled={busy || !focusOut}>⬇ Download {focusMeta.label}</button>
         {#if outputs.length > 1}<button class="ghost-btn full" on:click={downloadAll} disabled={busy}>⬇ Download all ({outputs.length})</button>{/if}
 

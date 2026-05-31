@@ -218,6 +218,38 @@ def _rgba_smallest(frames, delays, zlevel: int = 1):
     return _rgba_apng(f2, d2, zlevel), f2, d2
 
 
+try:
+    import oxipng as _oxipng
+except Exception:  # noqa: BLE001
+    _oxipng = None
+
+
+def _oxipng_squeeze(data: bytes, *, level: int = 6, zopfli: bool = False) -> bytes:
+    """Final lossless deflate pass over an assembled APNG via oxipng.
+
+    oxipng re-filters and recompresses every frame's IDAT/fdAT but does NOT redo
+    inter-frame geometry, so it must run LAST (after apngasm has done the sub-rect
+    + dispose/blend diffing). It preserves the acTL/fcTL/fdAT animation chunks
+    (verified), so a failure or a no-op just returns the original bytes. Worth a
+    few % — often the last margin needed to slip under 512 KB."""
+    if _oxipng is None or not data:
+        return data
+    try:
+        kwargs = {"level": level}
+        if zopfli:
+            try:
+                kwargs["deflate"] = _oxipng.Deflaters.zopfli(15)
+            except Exception:  # noqa: BLE001
+                pass  # older pyoxipng without zopfli deflater -> default deflate
+        out = _oxipng.optimize_from_memory(data, **kwargs)
+        if out and len(out) < len(data) and b"acTL" in out:
+            log.info("encode.oxipng", before=len(data), after=len(out))
+            return out
+    except Exception:  # noqa: BLE001
+        log.warning("encode.oxipng_error", exc_info=True)
+    return data
+
+
 def _write_frames(frames, td) -> None:
     for i, arr in enumerate(frames):
         Image.fromarray(arr, "RGBA").save(os.path.join(td, f"f{i:05d}.png"), "PNG")
@@ -268,7 +300,7 @@ def encode_gif(frames, delays, *, budget, max_colors=256, fps_cap=24) -> tuple[b
         return min(fps_cap, max(1.0, 1000.0 / ((sum(de) / len(de)) or 100.0)))
 
     # 1) Full frames at full colour — best case (and what big-budget GIFs hit).
-    full = _gif_render_once(frames, base_fps, colors)
+    full = _gif_best_render(frames, base_fps, colors)
     if full is not None and len(full) <= budget:
         return full, "GIF", len(frames), round(base_fps, 2)
 
@@ -287,7 +319,7 @@ def encode_gif(frames, delays, *, budget, max_colors=256, fps_cap=24) -> tuple[b
             seen.add(target)
             f2, d2 = even_subsample(frames, delays, target)
             fps2 = fps_for(d2)
-            d = _gif_render_once(f2, fps2, colors)
+            d = _gif_best_render(f2, fps2, colors)
             if d is not None and len(d) <= budget:
                 return d, "GIF", len(f2), round(fps2, 2)
             if d is not None and (best is None or len(d) < len(best)):
@@ -299,7 +331,7 @@ def encode_gif(frames, delays, *, budget, max_colors=256, fps_cap=24) -> tuple[b
     for c in (128, 64, 32):
         if c >= colors:
             continue
-        d = _gif_render_once(f3, fps3, c)
+        d = _gif_best_render(f3, fps3, c)
         if d is not None and len(d) <= budget:
             return d, "GIF", len(f3), round(fps3, 2)
         if d is not None and (best is None or len(d) < len(best)):
@@ -318,6 +350,71 @@ def _gif_render_once(fr, fps_v, colors):
         return _gif_render(td, fps_v, colors)
     finally:
         shutil.rmtree(td, ignore_errors=True)
+
+
+def _gifski_available() -> bool:
+    return shutil.which("gifski") is not None
+
+
+def _gifski_render(fr, fps_v, quality: int) -> bytes | None:
+    """Encode a GIF with gifski (libimagequant per-frame palettes + temporal
+    dithering + inter-frame importance maps) — measurably higher quality per byte
+    than ffmpeg's global/per-frame palette. gifski targets *quality*, not bytes,
+    so the caller still owns the frame/fps search to hit the budget. Returns None
+    if gifski is absent or fails (caller falls back to the ffmpeg path)."""
+    if not _gifski_available():
+        return None
+    td = tempfile.mkdtemp()
+    try:
+        _write_frames(fr, td)  # f00000.png … ; gifski takes them as positional args
+        pngs = sorted(glob.glob(os.path.join(td, "f*.png")))
+        out = os.path.join(td, "out.gif")
+        cmd = ["gifski", "-o", out, "--fps", str(max(1, int(round(fps_v)))),
+               "--quality", str(int(quality)), "--quiet", *pngs]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0 or not os.path.exists(out):
+            log.warning("gif.gifski_failed", returncode=proc.returncode,
+                        stderr=proc.stderr.decode("utf-8", "replace")[:200])
+            return None
+        with open(out, "rb") as fh:
+            data = fh.read()
+        log.info("gif.gifski", quality=quality, fps=round(fps_v, 2), bytes=len(data))
+        return data
+    except Exception:  # noqa: BLE001
+        log.warning("gif.gifski_error", exc_info=True)
+        return None
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def _gifsicle_squeeze(data: bytes, lossy: int = 60) -> bytes:
+    """Lossy-LZW + inter-frame optimization post-pass via gifsicle (-O3 --lossy).
+    Stacks with gifski (gifski's internal lossy is lighter). No-op/last-resort safe:
+    returns the original bytes if gifsicle is absent, errors, or doesn't help."""
+    if shutil.which("gifsicle") is None or not data:
+        return data
+    try:
+        proc = subprocess.run(["gifsicle", "-O3", f"--lossy={int(lossy)}"],
+                              input=data, capture_output=True)
+        if proc.returncode == 0 and proc.stdout and len(proc.stdout) < len(data):
+            log.info("gif.gifsicle", before=len(data), after=len(proc.stdout), lossy=lossy)
+            return proc.stdout
+    except Exception:  # noqa: BLE001
+        log.warning("gif.gifsicle_error", exc_info=True)
+    return data
+
+
+def _gif_best_render(fr, fps_v, colors):
+    """Best available single GIF encode of these frames: prefer gifski (+gifsicle
+    squeeze), fall back to the ffmpeg per-frame-palette path. `colors` maps to a
+    gifski --quality so the budget search behaves the same across backends."""
+    if _gifski_available():
+        # colors is the search lever; map 256->90 (max) down to a quality floor.
+        quality = max(50, min(100, int(round(colors / 256 * 90))))
+        d = _gifski_render(fr, fps_v, quality)
+        if d is not None:
+            return _gifsicle_squeeze(d)
+    return _gif_render_once(fr, fps_v, colors)
 
 
 def encode_static(arr: np.ndarray, params) -> tuple[bytes, str]:
@@ -339,8 +436,11 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
     priority = getattr(params, "priority", "balanced")
     priority = priority.value if hasattr(priority, "value") else priority
 
+    # zopfli (slow) only when the clip is tight enough that the last few % matter;
+    # for comfortably-small clips the default oxipng pass is plenty and far faster.
     def done(data, fr, de):
-        return data, "APNG", len(fr), _avg_fps(de)
+        squeezed = _oxipng_squeeze(data, zopfli=len(data) > budget * 0.85)
+        return squeezed, "APNG", len(fr), _avg_fps(de)
 
     # "Richer"/sharp (the sticker default) and the no-pngquant case keep colors:
     # encode truecolor RGBA — which has no shared palette and so can never band or
