@@ -72,7 +72,10 @@ def _decode_and_matte(source: Source, params, emit: EmitFn) -> dict:
 
 def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str, StickerMeta]]:
     specs = [(_v(o.type), _v(o.gif_quality), o) for o in (params.outputs or [])]
-    profiles = {t: profile_for(t, gq) for t, gq, _ in specs}
+    profiles = {
+        t: profile_for(t, gq, _v(o.sticker_format) or _v(params.sticker_format))
+        for t, gq, o in specs
+    }
 
     key = _matte_key(source, params)
     shared = matte_cache.get(key)

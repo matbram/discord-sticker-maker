@@ -56,6 +56,14 @@ class GifAspect(str, Enum):
     wide = "16:9"
 
 
+class StickerFormat(str, Enum):
+    # Discord's sticker uploader accepts APNG, PNG, JPG and GIF (320x320, <=512KB).
+    #   gif  -> per-frame palettes keep all frames smooth & colorful (1-bit alpha)
+    #   apng -> soft 8-bit transparency; best when the background was cut out
+    gif = "gif"
+    apng = "apng"
+
+
 # Per-output Discord profiles. Square types resize to (size, size); gif keeps
 # aspect within max_dim. budget = target bytes (hard Discord limit noted too).
 GIF_PROFILES = {
@@ -65,12 +73,18 @@ GIF_PROFILES = {
 }
 
 
-def profile_for(output_type: str, gif_quality: str = "balanced") -> dict:
+def profile_for(output_type: str, gif_quality: str = "balanced",
+                sticker_format: str = "gif") -> dict:
     if output_type == "sticker":
-        # 320x320 under 512KB rarely fits >~25 frames, so a lower cap avoids
-        # encoding frames we'd only trim away (big speedup, same output).
-        return {"square": True, "size": 320, "animated_format": "APNG", "static_format": "PNG",
-                "budget": TARGET_BYTES, "hard_limit": DISCORD_MAX_BYTES, "frame_cap": 48}
+        # Discord accepts both GIF and APNG stickers at 320x320 / <=512KB. GIF is
+        # the default: per-frame palettes keep every frame smooth & colorful, so
+        # nothing gets dropped for color. APNG is offered for cut-out subjects that
+        # need soft (8-bit) edges instead of GIF's 1-bit on/off transparency.
+        sf = sticker_format.value if hasattr(sticker_format, "value") else sticker_format
+        animated = "GIF" if sf == "gif" else "APNG"
+        return {"square": True, "size": 320, "animated_format": animated, "static_format": "PNG",
+                "budget": TARGET_BYTES, "hard_limit": DISCORD_MAX_BYTES, "frame_cap": 48,
+                "fps_cap": 30}
     if output_type == "emoji":
         return {"square": True, "size": 128, "animated_format": "GIF", "static_format": "PNG",
                 "budget": 256 * 1024, "hard_limit": 256 * 1024, "frame_cap": 48}
@@ -95,6 +109,7 @@ class OutputSpec(BaseModel):
     type: OutputType = OutputType.sticker
     priority: Optional[Priority] = None
     max_colors: Optional[int] = Field(None, ge=2, le=256)
+    sticker_format: Optional[StickerFormat] = None  # sticker-only; falls back to ProcessParams
     gif_quality: GifQuality = GifQuality.balanced
     aspect: GifAspect = GifAspect.source  # GIF-only; sticker/emoji ignore it (always square)
     # Per-output framing — falls back to the shared ProcessParams values when unset,
@@ -124,6 +139,7 @@ class ProcessParams(BaseModel):
     max_duration_s: float = Field(4.0, ge=0.1, le=30.0)
     trim_start_s: float = Field(0.0, ge=0.0)
     priority: Priority = Priority.balanced
+    sticker_format: StickerFormat = StickerFormat.gif
 
     # encoding defaults (per-output may override)
     max_bytes: int = Field(TARGET_BYTES, ge=10 * 1024, le=DISCORD_MAX_BYTES)

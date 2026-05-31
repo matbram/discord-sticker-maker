@@ -19,7 +19,8 @@
       remove_bg: false, bg_model: 'auto', auto_crop: true, fit_mode: 'fill',
       zoom: 1.0, offset_x: 0.0, offset_y: 0.0, padding: 0.06,
       max_fps: 18, max_duration_s: 4.0, trim_start_s: 0.0,
-      priority: 'sharp', max_colors: 256, gif_quality: 'balanced', gif_aspect: 'source'
+      priority: 'balanced', max_colors: 256, gif_quality: 'balanced', gif_aspect: 'source',
+      sticker_format: 'gif'
     }
   }
 
@@ -120,7 +121,7 @@
     const f = (t) => ({ zoom: framing[t].zoom, offset_x: framing[t].offset_x, offset_y: framing[t].offset_y, fit_mode: framing[t].fit_mode })
     const list = []
     if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect, ...f('gif') })
-    if (selected.sticker) list.push({ type: 'sticker', priority: params.priority, ...f('sticker') })
+    if (selected.sticker) list.push({ type: 'sticker', priority: params.priority, sticker_format: params.sticker_format, ...f('sticker') })
     if (selected.emoji) list.push({ type: 'emoji', priority: params.priority, ...f('emoji') })
     return list
   }
@@ -196,6 +197,7 @@
   function onCropChange(e) { applyFraming({ zoom: e.detail.zoom, offset_x: e.detail.offsetX, offset_y: e.detail.offsetY }); scheduleRegen() }
   function setFit(m) { applyFraming({ zoom: 1, offset_x: 0, offset_y: 0, fit_mode: m }); scheduleRegen() }
   function setPriority(p) { params = { ...params, priority: p }; scheduleRegen() }
+  function setStickerFormat(fmt) { params = { ...params, sticker_format: fmt }; scheduleRegen() }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
   function toggleBg() { params = { ...params, remove_bg: !params.remove_bg }; scheduleRegen() }
@@ -355,13 +357,24 @@
             </div>
           </div>
         {:else if focusOut?.meta.animated}
-          <div class="ctl"><span class="ctl-label">Motion</span>
-            <div class="seg three">
-              <button class:on={params.priority === 'smooth'} on:click={() => setPriority('smooth')}>More frames</button>
-              <button class:on={params.priority === 'balanced'} on:click={() => setPriority('balanced')}>Balanced</button>
-              <button class:on={params.priority === 'sharp'} on:click={() => setPriority('sharp')}>Richer</button>
+          {#if focusedType === 'sticker'}
+            <div class="ctl"><span class="ctl-label">Sticker format</span>
+              <div class="seg small">
+                <button class:on={params.sticker_format === 'gif'} on:click={() => setStickerFormat('gif')}>GIF</button>
+                <button class:on={params.sticker_format === 'apng'} on:click={() => setStickerFormat('apng')}>APNG</button>
+              </div>
+              <p class="muted-line">{params.sticker_format === 'gif' ? 'Smoothest, most colorful — best for most stickers.' : 'Soft transparent edges — best with the background cut out.'}</p>
             </div>
-          </div>
+          {/if}
+          {#if !(focusedType === 'sticker' && params.sticker_format === 'gif')}
+            <div class="ctl"><span class="ctl-label">Motion</span>
+              <div class="seg three">
+                <button class:on={params.priority === 'smooth'} on:click={() => setPriority('smooth')}>More frames</button>
+                <button class:on={params.priority === 'balanced'} on:click={() => setPriority('balanced')}>Balanced</button>
+                <button class:on={params.priority === 'sharp'} on:click={() => setPriority('sharp')}>Richer</button>
+              </div>
+            </div>
+          {/if}
         {/if}
 
         <div class="ctl"><span class="ctl-label">Preview on</span>

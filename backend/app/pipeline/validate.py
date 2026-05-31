@@ -25,7 +25,7 @@ def build_checklist_for(output_type: str, data: bytes, width: int, height: int,
         return {
             f"{profile['size']}×{profile['size']} px": width == profile["size"] and height == profile["size"],
             "Under 512 KB": size <= DISCORD_MAX_BYTES,
-            "PNG / APNG": fmt in ("PNG", "APNG"),
+            "APNG / PNG / GIF": fmt in ("PNG", "APNG", "GIF"),
             "Transparent background": has_alpha,
         }
     if output_type == "emoji":

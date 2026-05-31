@@ -118,8 +118,8 @@ def _assemble_apngasm(frame_pngs: list[bytes], delays, zlevel: int = 0) -> bytes
     delay, so we use the mean (video and most GIFs are uniform). None on any failure.
 
     zlevel selects the deflater: 0=zlib (fast, ~3s/72 frames), 1=7zip (slower, ~17s,
-    but noticeably smaller). "smooth" uses 7zip so the freed bytes buy more colours
-    at the same frame count."""
+    but noticeably smaller), 2=zopfli (slowest, ~10-20% smaller still). We try zopfli
+    at full frames before ever dropping frames, so the freed bytes keep motion smooth."""
     if not _apngasm_available():
         return None
     delay_ms = max(10, int(round(sum(delays) / len(delays)))) if delays else 100
@@ -360,6 +360,17 @@ def encode_animated(frames, delays, params) -> tuple[bytes, str, int, float | No
         if scored:
             return done(max(scored, key=lambda x: x[0])[1], frames, delays)
         return done(probe, frames, delays)
+
+    # Full frames over budget even at the floor color. Before dropping ANY frames,
+    # pay for the slow zopfli deflater (-z2) at the floor on full frames — it often
+    # reclaims the last 10-20% so every frame survives (smoother motion). It runs at
+    # most once, and only here where the alternative is choppier output. (Not for
+    # sharp: that path keeps colors via truecolor + frame drops, handled above.)
+    if priority != "sharp" and len(probe) > budget:
+        z = _palette_apng(frames, delays, floor, zlevel=2)
+        if z is not None and len(z) <= budget:
+            log.info("encode.zopfli_kept_frames", bytes=len(z), frames=len(frames))
+            return done(z, frames, delays)
 
     # Too big at full frames (or sharp fallback): pick a frame count from the probe,
     # then try colors at that count in parallel and keep the highest that fits.
