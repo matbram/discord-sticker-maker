@@ -20,7 +20,7 @@
       zoom: 1.0, offset_x: 0.0, offset_y: 0.0, padding: 0.06,
       max_fps: 18, max_duration_s: 4.0, trim_start_s: 0.0,
       priority: 'balanced', max_colors: 256, gif_quality: 'balanced', gif_aspect: 'source',
-      sticker_format: 'gif'
+      sticker_format: 'apng'
     }
   }
 
@@ -198,6 +198,7 @@
   function setFit(m) { applyFraming({ zoom: 1, offset_x: 0, offset_y: 0, fit_mode: m }); scheduleRegen() }
   function setPriority(p) { params = { ...params, priority: p }; scheduleRegen() }
   function setStickerFormat(fmt) { params = { ...params, sticker_format: fmt }; scheduleRegen() }
+  function setFps(v) { params = { ...params, max_fps: Math.max(1, Math.min(30, Math.round(v))) }; scheduleRegen() }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
   function toggleBg() { params = { ...params, remove_bg: !params.remove_bg }; scheduleRegen() }
@@ -360,13 +361,13 @@
           {#if focusedType === 'sticker'}
             <div class="ctl"><span class="ctl-label">Sticker format</span>
               <div class="seg small">
-                <button class:on={params.sticker_format === 'gif'} on:click={() => setStickerFormat('gif')}>GIF</button>
                 <button class:on={params.sticker_format === 'apng'} on:click={() => setStickerFormat('apng')}>APNG</button>
+                <button class:on={params.sticker_format === 'gif'} on:click={() => setStickerFormat('gif')}>GIF</button>
               </div>
-              <p class="muted-line">{params.sticker_format === 'gif' ? 'Smoothest, most colorful — best for most stickers.' : 'Soft transparent edges — best with the background cut out.'}</p>
+              <p class="muted-line">{params.sticker_format === 'apng' ? 'Full color (truecolor) — best quality for most stickers.' : 'Smaller files & max compatibility, but capped at 256 colors.'}</p>
             </div>
           {/if}
-          {#if !(focusedType === 'sticker' && params.sticker_format === 'gif')}
+          {#if !(focusedType === 'sticker' && params.sticker_format === 'apng')}
             <div class="ctl"><span class="ctl-label">Motion</span>
               <div class="seg three">
                 <button class:on={params.priority === 'smooth'} on:click={() => setPriority('smooth')}>More frames</button>
@@ -375,6 +376,11 @@
               </div>
             </div>
           {/if}
+          <div class="ctl"><span class="ctl-label">Frame rate · {params.max_fps} fps</span>
+            <input class="slider" type="range" min="5" max="30" step="1" value={params.max_fps}
+                   on:input={(e) => setFps(+e.target.value)} />
+            <p class="muted-line">Lower fps = smaller file. Drop this first if you're over 512 KB.</p>
+          </div>
         {/if}
 
         <div class="ctl"><span class="ctl-label">Preview on</span>
@@ -478,6 +484,7 @@
   .muted-line { color: var(--muted-2); font-size: 12px; margin: 0; font-weight: 400; }
   .toggle { display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
   .toggle input { width: 38px; height: 22px; accent-color: var(--accent); }
+  .slider { width: 100%; accent-color: var(--accent); }
   .make-row { display: flex; flex-wrap: wrap; gap: 6px; }
   .mini-toggle { flex: 1; min-width: 80px; padding: 8px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-elevated); color: var(--muted); font-size: 13px; font-weight: 600; }
   .mini-toggle.on { border-color: var(--accent); color: #fff; background: var(--accent-soft); }

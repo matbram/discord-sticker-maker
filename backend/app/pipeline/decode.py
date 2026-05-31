@@ -47,14 +47,17 @@ def _to_rgba(img: Image.Image) -> np.ndarray:
     return np.asarray(img.convert("RGBA"), dtype=np.uint8)
 
 
-def _decode_image(data: bytes, max_duration_s: float | None = None, trim_start_s: float = 0.0) -> Frames:
+def _decode_image(data: bytes, max_duration_s: float | None = None, trim_start_s: float = 0.0,
+                  max_fps: int | None = None) -> Frames:
     """Decode a static or animated image to RGBA frames + per-frame delays.
 
     For animated images we seek to the trim window *first*, then evenly sample it
-    down to ``MAX_ANIM_FRAMES`` before converting. This means:
+    down to ``MAX_ANIM_FRAMES`` (and to ``max_fps`` if given) before converting:
       - a trim window anywhere in a long GIF is honored (the old code only ever
         looked at the first ~80 source frames, so a later window froze to one
-        frame), and
+        frame),
+      - ``max_fps`` is now applied to GIF/APNG sources too (previously it only
+        affected video), so lowering FPS is a real "shrink the file" lever, and
       - we never build more than ``MAX_ANIM_FRAMES`` RGBA arrays, so memory is
         bounded no matter how long the source is.
     """
@@ -93,10 +96,16 @@ def _decode_image(data: bytes, max_duration_s: float | None = None, trim_start_s
         img.seek(n - 1)
         return Frames(frames=[_to_rgba(img)], delays_ms=[max(1, last_d)], animated=False)
 
-    # Sample down to MAX_ANIM_FRAMES (duration-preserving) BEFORE converting, so
-    # only the kept indices are ever turned into RGBA arrays.
-    if len(win_idx) > MAX_ANIM_FRAMES:
-        win_idx, win_delays = even_subsample(win_idx, win_delays, MAX_ANIM_FRAMES)
+    # Honor max_fps on image sources too: cap the kept frames to fps * duration so
+    # lowering FPS genuinely shrinks the output (the user's "optimize to fit" knob).
+    cap = MAX_ANIM_FRAMES
+    if max_fps:
+        window_ms = sum(win_delays)
+        cap = min(cap, max(2, int(round(max_fps * window_ms / 1000.0))))
+    # Sample down to the cap (duration-preserving) BEFORE converting, so only the
+    # kept indices are ever turned into RGBA arrays.
+    if len(win_idx) > cap:
+        win_idx, win_delays = even_subsample(win_idx, win_delays, cap)
 
     frames: list[np.ndarray] = []
     for i in win_idx:
@@ -145,4 +154,4 @@ def _decode_video(data: bytes, max_fps: int, max_duration_s: float, trim_start_s
 def decode(source: Source, params) -> Frames:
     if source.kind == InputKind.VIDEO:
         return _decode_video(source.data, params.max_fps, params.max_duration_s, params.trim_start_s)
-    return _decode_image(source.data, params.max_duration_s, params.trim_start_s)
+    return _decode_image(source.data, params.max_duration_s, params.trim_start_s, params.max_fps)

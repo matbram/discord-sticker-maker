@@ -74,7 +74,7 @@ GIF_PROFILES = {
 
 
 def profile_for(output_type: str, gif_quality: str = "balanced",
-                sticker_format: str = "gif") -> dict:
+                sticker_format: str = "apng") -> dict:
     if output_type == "sticker":
         # Discord accepts both GIF and APNG stickers at 320x320 / <=512KB. GIF is
         # the default: per-frame palettes keep every frame smooth & colorful, so
@@ -83,7 +83,7 @@ def profile_for(output_type: str, gif_quality: str = "balanced",
         sf = sticker_format.value if hasattr(sticker_format, "value") else sticker_format
         animated = "GIF" if sf == "gif" else "APNG"
         return {"square": True, "size": 320, "animated_format": animated, "static_format": "PNG",
-                "budget": TARGET_BYTES, "hard_limit": DISCORD_MAX_BYTES, "frame_cap": 48,
+                "budget": TARGET_BYTES, "hard_limit": DISCORD_MAX_BYTES, "frame_cap": 60,
                 "fps_cap": 30}
     if output_type == "emoji":
         return {"square": True, "size": 128, "animated_format": "GIF", "static_format": "PNG",
@@ -139,7 +139,7 @@ class ProcessParams(BaseModel):
     max_duration_s: float = Field(4.0, ge=0.1, le=30.0)
     trim_start_s: float = Field(0.0, ge=0.0)
     priority: Priority = Priority.balanced
-    sticker_format: StickerFormat = StickerFormat.gif
+    sticker_format: StickerFormat = StickerFormat.apng
 
     # encoding defaults (per-output may override)
     max_bytes: int = Field(TARGET_BYTES, ge=10 * 1024, le=DISCORD_MAX_BYTES)

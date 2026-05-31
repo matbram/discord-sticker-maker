@@ -224,70 +224,91 @@ def _write_frames(frames, td) -> None:
 
 
 def _gif_render(td, fps_v, colors):
-    """Run palettegen+paletteuse against frames already written in `td`."""
+    """High-quality GIF from the frames in `td`, in a single ffmpeg pass.
+
+    Uses a *per-frame* palette (``palettegen=stats_mode=single`` + ``paletteuse=new=1``)
+    so each frame carries its own optimal colours instead of sharing one washed-out
+    global palette — the standard fix for ffmpeg GIF banding — plus error-diffusion
+    dithering to simulate colours beyond the 256 a GIF frame can hold."""
     pattern = os.path.join(td, "f%05d.png")
-    pal = os.path.join(td, f"pal{colors}.png")
     out = os.path.join(td, f"o{colors}.gif")
     fr_arg = f"{fps_v:.3f}"
-    r1 = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-framerate", fr_arg,
-                         "-i", pattern, "-vf", f"palettegen=max_colors={colors}:reserve_transparent=1", pal],
-                        capture_output=True)
-    if r1.returncode != 0:
-        log.warning("gif.palettegen_failed", stderr=r1.stderr.decode("utf-8", "replace")[:200]); return None
-    r2 = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-framerate", fr_arg,
-                         "-i", pattern, "-i", pal, "-lavfi", "paletteuse=alpha_threshold=128", "-loop", "0", out],
-                        capture_output=True)
-    if r2.returncode != 0 or not os.path.exists(out):
-        log.warning("gif.paletteuse_failed", stderr=r2.stderr.decode("utf-8", "replace")[:200]); return None
+    lavfi = (
+        "split[a][b];"
+        f"[a]palettegen=max_colors={colors}:stats_mode=single:reserve_transparent=1[p];"
+        "[b][p]paletteuse=new=1:dither=sierra2_4a:alpha_threshold=128"
+    )
+    r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-framerate", fr_arg,
+                        "-i", pattern, "-lavfi", lavfi, "-loop", "0", out],
+                       capture_output=True)
+    if r.returncode != 0 or not os.path.exists(out):
+        log.warning("gif.render_failed", stderr=r.stderr.decode("utf-8", "replace")[:200]); return None
     with open(out, "rb") as fh:
         data = fh.read()
     log.info("gif.attempt", colors=colors, fps=round(fps_v, 2), bytes=len(data))
     return data
 
 
+GIF_FRAME_FLOOR = 6  # don't drop a GIF below this many frames just to keep colours
+
+
 def encode_gif(frames, delays, *, budget, max_colors=256, fps_cap=24) -> tuple[bytes, str, int, float | None]:
-    """GIF via ffmpeg palettegen/paletteuse (1-bit alpha). Frames are written once;
-    the colour levels are tried in parallel and we keep the highest that fits."""
+    """GIF via ffmpeg with per-frame palettes (1-bit alpha). To fit ``budget`` we KEEP
+    the full colour count and drop frames — matching the sticker's "keep colours"
+    intent and mirroring the truecolor-APNG path — and only reduce colours as a last
+    resort. The old code did the opposite (cut colours to 32 first), which is what
+    left GIF stickers looking washed out."""
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is required for GIF encoding")
     mean_ms = (sum(delays) / len(delays)) if delays else 100.0
     base_fps = min(fps_cap, max(1.0, 1000.0 / mean_ms))
-    color_steps = [c for c in (256, 128, 64, 32) if c <= max_colors] or [max(2, min(max_colors, 256))]
+    colors = max(2, min(max_colors, 256))
 
-    def run_set(fr, fps_v):
-        td = tempfile.mkdtemp()
-        try:
-            _write_frames(fr, td)
-            res = _run_parallel([(lambda c=c: _gif_render(td, fps_v, c)) for c in color_steps])
-            return list(zip(color_steps, res))
-        finally:
-            shutil.rmtree(td, ignore_errors=True)
+    def fps_for(de):
+        return min(fps_cap, max(1.0, 1000.0 / ((sum(de) / len(de)) or 100.0)))
 
-    full = run_set(frames, base_fps)
-    fits = [(c, d) for c, d in full if d is not None and len(d) <= budget]
-    if fits:
-        c, d = max(fits, key=lambda x: x[0])
-        return d, "GIF", len(frames), round(base_fps, 2)
+    # 1) Full frames at full colour — best case (and what big-budget GIFs hit).
+    full = _gif_render_once(frames, base_fps, colors)
+    if full is not None and len(full) <= budget:
+        return full, "GIF", len(frames), round(base_fps, 2)
 
-    best = min((d for _, d in full if d), key=len, default=None)
-    best_n = len(frames)
+    # 2) Keep colour, drop frames: estimate the count that fits from the measured
+    #    full-frame size, then descend and keep the largest set that fits.
+    best, best_n, best_fps = full, len(frames), base_fps
     n = len(frames)
-    for divisor in (2, 3, 4):
-        target = max(6, n // divisor)
-        if target >= n:
+    if full is not None and n > GIF_FRAME_FLOOR:
+        per = len(full) / n
+        est = int(budget / per * 0.95) if per > 0 else GIF_FRAME_FLOOR
+        seen: set[int] = set()
+        for target in (est, int(n * 0.66), n // 2, n // 3, GIF_FRAME_FLOOR):
+            target = max(GIF_FRAME_FLOOR, min(n - 1, int(target)))
+            if target in seen:
+                continue
+            seen.add(target)
+            f2, d2 = even_subsample(frames, delays, target)
+            fps2 = fps_for(d2)
+            d = _gif_render_once(f2, fps2, colors)
+            if d is not None and len(d) <= budget:
+                return d, "GIF", len(f2), round(fps2, 2)
+            if d is not None and (best is None or len(d) < len(best)):
+                best, best_n, best_fps = d, len(f2), fps2
+
+    # 3) Last resort: reduce colours at the floor frame count (dense clip).
+    f3, d3 = even_subsample(frames, delays, min(n, GIF_FRAME_FLOOR))
+    fps3 = fps_for(d3)
+    for c in (128, 64, 32):
+        if c >= colors:
             continue
-        f2, d2 = even_subsample(frames, delays, target)
-        fps2 = min(fps_cap, max(1.0, 1000.0 / ((sum(d2) / len(d2)) or 100.0)))
-        d = _gif_render_once(f2, fps2, color_steps[-1])
+        d = _gif_render_once(f3, fps3, c)
         if d is not None and len(d) <= budget:
-            return d, "GIF", len(f2), round(fps2, 2)
+            return d, "GIF", len(f3), round(fps3, 2)
         if d is not None and (best is None or len(d) < len(best)):
-            best, best_n = d, len(f2)
+            best, best_n, best_fps = d, len(f3), fps3
 
     if best is None:
         raise RuntimeError("gif encode produced nothing")
     log.warning("gif.over_budget", bytes=len(best), budget=budget)
-    return best, "GIF", best_n, round(base_fps, 2)
+    return best, "GIF", best_n, round(best_fps, 2)
 
 
 def _gif_render_once(fr, fps_v, colors):
