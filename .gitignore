@@ -1,8 +1,16 @@
 # python
 backend/.venv/
+.venv/
 __pycache__/
 *.pyc
 models/
+*.egg-info/
+build/
+dist/
+
+# fovea encoder
+bench/out/
+bench/corpus/clips/
 
 # node / frontend build
 frontend/node_modules/
