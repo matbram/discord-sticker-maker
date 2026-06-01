@@ -1,13 +1,15 @@
 """Bridge: encode a GIF output through the Fovea encoder, with a safe fallback.
 
-The orchestrator produces GIF outputs (emoji + gif) by calling ``encode_gif``.
-This module routes those through Fovea's ``encode()`` — which hits the byte
-budget while keeping every frame and judging quality perceptually — and falls
-back to the legacy ffmpeg path if Fovea is disabled, unavailable, or errors.
+The orchestrator's GIF outputs (gif + emoji) route through here. We run Fovea's
+``encode()`` to hit the byte budget while judging quality perceptually, with the
+legacy ffmpeg path as an automatic fallback.
 
-Toggle with ``USE_FOVEA_GIF`` (default on). Per-encode time budget via
-``FOVEA_BUDGET_SECONDS`` (default 25s); the search is anytime, so it returns the
-best result found within the budget.
+Auto-balance (default on): keeping *every* frame at a tight size can force a tiny
+palette (washed-out color). So we hold a color floor — keep as many frames as fit
+that floor, and only trim frames when all-frames would crush color. Fovea then
+maximizes colors within the budget on the kept frames. Tunables:
+  USE_FOVEA_GIF (on), FOVEA_AUTOBALANCE (on), FOVEA_COLOR_FLOOR (48),
+  FOVEA_BUDGET_SECONDS (25), FOVEA_MAX_ATTEMPTS (16), FOVEA_COMPARE (on).
 """
 from __future__ import annotations
 
@@ -19,66 +21,163 @@ import tempfile
 
 log = logging.getLogger("fovea.bridge")
 
+MIN_FRAMES = 6  # never trim a clip below this many frames for color
+
 
 def _enabled() -> bool:
     return os.getenv("USE_FOVEA_GIF", "1").lower() not in ("0", "false", "no")
 
 
-def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, notes=None):
-    """Return ``(bytes, "GIF", n_frames, fps)`` for the fitted frames under ``budget``.
+def compare_enabled() -> bool:
+    return os.getenv("FOVEA_COMPARE", "1").lower() not in ("0", "false", "no")
 
-    Tries Fovea first (keeping all frames); falls back to the legacy ffmpeg
-    palette encoder on any failure so a single bad encode never breaks a job.
-    """
+
+def _autobalance_enabled() -> bool:
+    return os.getenv("FOVEA_AUTOBALANCE", "1").lower() not in ("0", "false", "no")
+
+
+def _color_floor() -> int:
+    try:
+        return max(2, int(os.getenv("FOVEA_COLOR_FLOOR", "48")))
+    except ValueError:
+        return 48
+
+
+# --------------------------------------------------------------------------- #
+# Auto-balance: choose how many frames to keep so the palette stays rich.
+# --------------------------------------------------------------------------- #
+
+def _probe_size_at_colors(fitted, delays, colors: int) -> int | None:
+    """Measure the GIF size of ALL frames at a fixed color count (one encode)."""
+    try:
+        from encoder.core.engines import FfmpegPaletteEngine, prepare_context
+        from encoder.core.frames import frames_from_list
+        from encoder.core.levers import LeverState
+
+        td = tempfile.mkdtemp(prefix="fovea_probe_")
+        try:
+            ctx = prepare_context(frames_from_list(list(fitted), list(delays)), 1.0, td)
+            out = FfmpegPaletteEngine().encode(
+                ctx, LeverState(colors=colors, dither="sierra2_4a"), os.path.join(td, "p.gif"))
+            return out.size_bytes
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("fovea.probe_failed: %s", str(exc)[:160])
+        return None
+
+
+def _autobalanced_frames(fitted, delays, budget: int):
+    """Return the frames Fovea should encode: all of them if they fit the color
+    floor, else an evenly-spread subset sized so the floor fits the budget."""
+    total = len(fitted)
+    if not _autobalance_enabled() or total <= MIN_FRAMES:
+        return fitted, delays
+    floor = _color_floor()
+    size_at_floor = _probe_size_at_colors(fitted, delays, floor)
+    if size_at_floor is None or size_at_floor <= budget:
+        return fitted, delays  # all frames already hold the color floor
+    # GIF size is ~linear in frame count; size for the budget at the floor.
+    keep = max(MIN_FRAMES, int(total * budget / size_at_floor * 0.90))
+    if keep >= total:
+        return fitted, delays
+    from .encode import even_subsample
+
+    work_f, work_d = even_subsample(list(fitted), list(delays), keep)
+    log.info("fovea.autobalance total=%d keep=%d floor=%d size_at_floor=%d budget=%d",
+             total, len(work_f), floor, size_at_floor, budget)
+    return work_f, work_d
+
+
+def _run_fovea(fitted, delays, budget: int):
+    """Auto-balanced Fovea encode -> (bytes, n_frames, output_fps, colors)."""
+    from encoder import encode as fovea_encode
+
+    work_f, work_d = _autobalanced_frames(fitted, delays, budget)
+    td = tempfile.mkdtemp(prefix="fovea_run_")
+    try:
+        out = os.path.join(td, "o.gif")
+        rep = out + ".json"
+        res = fovea_encode(
+            list(work_f), target_bytes=budget, mode="cap", delays_ms=list(work_d),
+            max_attempts=int(os.getenv("FOVEA_MAX_ATTEMPTS", "16")),
+            budget_seconds=float(os.getenv("FOVEA_BUDGET_SECONDS", "25")),
+            out_path=out, report_path=rep,
+        )
+        with open(out, "rb") as fh:
+            data = fh.read()
+        colors = None
+        try:
+            colors = json.load(open(rep)).get("lever_setting", {}).get("colors")
+        except Exception:  # noqa: BLE001
+            pass
+        return data, len(work_f), res.output_fps, colors
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def _fovea_note(total: int, kept: int, colors) -> str:
+    if kept < total:
+        c = f"{colors} colors" if colors else "more color"
+        return f"Fovea kept {kept} of {total} frames to hold {c} (avoids washed-out color)."
+    if colors:
+        return f"Fovea kept all {total} frames at {colors} colors."
+    return f"Fovea kept all {total} frames."
+
+
+# --------------------------------------------------------------------------- #
+# Public entry points
+# --------------------------------------------------------------------------- #
+
+def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, notes=None):
+    """Return ``(bytes, "GIF", n_frames, fps)`` for the fitted frames under ``budget``."""
     if _enabled():
         try:
-            return _fovea_encode(fitted, delays, int(budget), notes)
+            data, n, fps, colors = _run_fovea(fitted, delays, int(budget))
+            if notes is not None:
+                notes.append(_fovea_note(len(fitted), n, colors))
+            return data, "GIF", n, fps
         except Exception as exc:  # noqa: BLE001 - never let Fovea break the pipeline
             log.warning("fovea.bridge_failed; falling back to legacy: %s", str(exc)[:200])
             if notes is not None:
                 notes.append("Fovea encode failed; used the standard encoder.")
-    # Lazy import keeps this module importable without the backend's heavier deps.
     from .encode import encode_gif as legacy
 
     return legacy(fitted, delays, budget=budget, max_colors=max_colors, fps_cap=fps_cap)
 
 
-def compare_enabled() -> bool:
-    """Whether to also run the legacy encoder for a side-by-side comparison."""
-    return os.getenv("FOVEA_COMPARE", "1").lower() not in ("0", "false", "no")
+def _aligned_distance(metric, fitted, delays, gif_path, n_frames: int) -> float:
+    """Distance between a GIF and the SAME frames it kept (subsample the source to
+    match), so a frame-trimmed candidate is judged on color/spatial fidelity rather
+    than on misaligned frames. Frame *count* is reported separately for motion."""
+    from encoder.core.frames import frames_from_list, load_gif
+
+    if n_frames < len(fitted):
+        from .encode import even_subsample
+
+        sf, sd = even_subsample(list(fitted), list(delays), n_frames)
+    else:
+        sf, sd = list(fitted), list(delays)
+    return metric.distance(frames_from_list(sf, sd), load_gif(gif_path)).distance
 
 
 def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24, notes=None):
-    """Encode the GIF with BOTH Fovea and the legacy encoder for a side-by-side.
+    """Encode with BOTH Fovea (auto-balanced) and the legacy encoder for a side-by-side.
 
-    Returns ``(fovea_bytes, "GIF", n_frames, fps, comparison, legacy_bytes)`` where
-    ``comparison`` carries each variant's size, frame count, and a perceptual
-    distance (same judge, same source) so the UI can show which is closer + smaller.
-    Both distances come from the encoder's reference metric.
+    Returns ``(fovea_bytes, "GIF", n_frames, fps, comparison, legacy_bytes)``. Each
+    side's perceptual distance is measured against the source subsampled to that
+    side's frame count, so the comparison is fair when frame counts differ.
     """
-    from encoder import encode as fovea_encode
-    from encoder.core.frames import frames_from_list, load_gif
     from encoder.metrics import default_metric
 
     from .encode import encode_gif as legacy_encode
 
     td = tempfile.mkdtemp(prefix="fovea_cmp_")
     try:
+        fovea_data, fovea_n, fovea_fps, fovea_colors = _run_fovea(fitted, delays, int(budget))
         fpath = os.path.join(td, "fovea.gif")
-        rep = os.path.join(td, "fovea.json")
-        fres = fovea_encode(
-            list(fitted), target_bytes=int(budget), mode="cap", delays_ms=list(delays),
-            max_attempts=int(os.getenv("FOVEA_MAX_ATTEMPTS", "16")),
-            budget_seconds=float(os.getenv("FOVEA_BUDGET_SECONDS", "25")),
-            out_path=fpath, report_path=rep,
-        )
-        with open(fpath, "rb") as fh:
-            fovea_data = fh.read()
-        fovea_colors = None
-        try:
-            fovea_colors = json.load(open(rep)).get("lever_setting", {}).get("colors")
-        except Exception:  # noqa: BLE001
-            pass
+        with open(fpath, "wb") as fh:
+            fh.write(fovea_data)
 
         legacy_data, _, legacy_n, _ = legacy_encode(
             fitted, delays, budget=budget, max_colors=max_colors, fps_cap=fps_cap)
@@ -87,44 +186,18 @@ def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24, no
             fh.write(legacy_data)
 
         metric = default_metric()
-        src = frames_from_list(list(fitted), list(delays))
-        fdist = metric.distance(src, load_gif(fpath)).distance
-        ldist = metric.distance(src, load_gif(lpath)).distance
+        fdist = _aligned_distance(metric, fitted, delays, fpath, fovea_n)
+        ldist = _aligned_distance(metric, fitted, delays, lpath, legacy_n)
         lossless = fdist <= metric.invisible_threshold
         comparison = {
             "metric": metric.name,
-            "fovea": {"bytes": len(fovea_data), "frames": len(fitted), "colors": fovea_colors,
+            "fovea": {"bytes": len(fovea_data), "frames": fovea_n, "colors": fovea_colors,
                       "distance": round(float(fdist), 5), "perceptually_lossless": bool(lossless)},
             "legacy": {"bytes": len(legacy_data), "frames": int(legacy_n),
                        "distance": round(float(ldist), 5)},
         }
         if notes is not None:
-            notes.append("Fovea: visually identical to the source at this size."
-                         if lossless else "Fovea: slight visible softening to fit the size limit.")
-        return fovea_data, "GIF", len(fitted), fres.output_fps, comparison, legacy_data
+            notes.append(_fovea_note(len(fitted), fovea_n, fovea_colors))
+        return fovea_data, "GIF", fovea_n, fovea_fps, comparison, legacy_data
     finally:
         shutil.rmtree(td, ignore_errors=True)
-
-
-def _fovea_encode(fitted, delays, budget, notes):
-    from encoder import encode as fovea_encode
-
-    td = tempfile.mkdtemp(prefix="fovea_gif_")
-    out = os.path.join(td, "o.gif")
-    try:
-        res = fovea_encode(
-            list(fitted), target_bytes=budget, mode="cap", delays_ms=list(delays),
-            max_attempts=int(os.getenv("FOVEA_MAX_ATTEMPTS", "16")),
-            budget_seconds=float(os.getenv("FOVEA_BUDGET_SECONDS", "25")),
-            out_path=out,
-        )
-        with open(out, "rb") as fh:
-            data = fh.read()
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    if notes is not None:
-        if res.perceptually_lossless:
-            notes.append("Fovea: visually identical to the source at this size.")
-        else:
-            notes.append("Fovea: slight visible softening to fit the size limit.")
-    return data, "GIF", len(fitted), res.output_fps

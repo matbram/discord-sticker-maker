@@ -232,7 +232,7 @@
   function setCustomDim(e) { const v = Math.round(parseFloat(e.target.value) || 0); if (v >= 16 && v <= 1024) setLimitDim(v) }
   function matchPct(d) { return Math.max(0, Math.min(100, (1 - (d || 0)) * 100)).toFixed(1) }
   function gifVerdict(c) {
-    if (c.fovea.frames > c.legacy.frames) return `Keeps all ${c.fovea.frames} frames — the standard encoder dropped to ${c.legacy.frames} to fit.`
+    if (c.fovea.frames > c.legacy.frames) return `Smoother: ${c.fovea.frames} frames vs ${c.legacy.frames}${c.fovea.colors ? `, at ${c.fovea.colors} colors` : ''}.`
     if (c.fovea.distance < c.legacy.distance - 1e-4) return 'Closer match to the source at the same size.'
     if (c.fovea.bytes < c.legacy.bytes * 0.97) return 'Smaller file at equal quality.'
     return 'Comparable to the standard encoder on this clip.'
@@ -372,7 +372,7 @@
                 <div class="cmp-tag">✦ Fovea {#if c.fovea.perceptually_lossless}<span class="cmp-badge">lossless</span>{/if}</div>
                 <img class="cmp-img" src={previewUrl('gif')} alt="Fovea result" />
                 <div class="cmp-stat">{fmtBytes(c.fovea.bytes)} · {c.fovea.frames}f{c.fovea.colors ? ` · ${c.fovea.colors} colors` : ''} · {matchPct(c.fovea.distance)}% match</div>
-                <div class="cmp-sub">keeps every frame — smoothest motion</div>
+                <div class="cmp-sub">balanced for rich color + smooth motion</div>
                 <button class="cmp-dl" on:click={() => download('gif')}>⬇ Download Fovea</button>
               </div>
               <div class="cmp-col">
