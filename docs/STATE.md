@@ -251,42 +251,214 @@ Plumbing: controls → `OutputSpec.max_bytes/max_dim/priority` → orchestrator
 
 ---
 
-## 8. Roadmap / what's next
+## 8. Remaining scopes (detailed build plan)
 
-**Immediate / small:**
-- Per-output `priority` (decouple GIF from sticker/emoji).
-- Tune `_color_floor_for` thresholds and `FOVEA_BUDGET_USE` from real clips.
-- Consider exposing the frames-vs-color choice as a labeled slider with live
-  preview of the (frames, colors) it will pick.
+Everything below is *not yet built*. Each scope says **why**, **where it plugs
+into our code**, the **approach**, **prerequisites**, **risks/open questions**, and
+**done when**. Suggested order is in §8.8. The throughline: M1 hit a hard
+size target by driving external engines and a *heuristic* GIF budget loop; the
+remaining work makes the quality judgment trustworthy (M2), replaces the engines
+with native internals that break the frames-vs-color frontier (M3), and turns the
+service into a scalable, honest product (M4/M5) — all proven against the
+benchmark (M0).
 
-**M2 — learned, motion-aware perceptual metric (the big one).**
-Trains a metric that *does* penalize banding/flicker and agrees with human
-preference. Plugs into `encoder/metrics/__init__.py::default_metric` behind the
-existing `Metric` interface — **no other code changes**. This is what lets the
-search optimize quality directly instead of via the budget-fill heuristic. Keep
-the temporal dimension. Validate with small human pairwise studies (spec §9).
+### 8.0 Cross-cutting principles to preserve (do not regress)
+- **Spec-compliant GIF** that plays everywhere; **keep every frame** in `encoder/`
+  by default (frame trimming is a *bridge*-level, user-chosen behavior only).
+- **Real measured size** (always actually encode; never estimate) and the
+  **anytime budget** (return best-so-far on a deadline).
+- **Honesty over silent failure** — report whether it stayed invisible and where
+  any loss landed.
+- **The measurement gate (spec §11):** nothing ships as "better" until it beats
+  the best baseline at equal size on the corpus. → makes §8.1 a hard prerequisite.
 
-**M3 — native internals (replace external engines):**
-- **Perceptual (sub-threshold) frame reuse** — carry a pixel over when the change
-  is invisible (not just exact-match). Biggest win on partial-motion content.
-- **Region-local palettes** — tile a frame, give regions their own ≤256-color
-  table. **This is the lever that could break the frames-vs-color frontier**
-  (more effective colors without dropping frames). Pay per-block overhead only
-  when it wins.
-- Joint RD-LZW, and a Rust core (PyO3) for the hot loops once proven.
+### 8.1 M0 activation — make the benchmark real (do this FIRST; cheap)
+- **Why:** the harness exists (`bench/`) but has **no clips**, so we have zero
+  hard evidence Fovea beats gifski/gifsicle/ffmpeg. Every future "better" claim
+  (and every M2/M3 gate) depends on this.
+- **Where:** `bench/corpus/manifest.yaml` (+ drop media into the gitignored
+  `bench/corpus/clips/`), `bench/run.py`, `bench/runners.py` (already supports a
+  `fovea` engine via `run_clip_target_fovea`).
+- **Approach:** assemble a fixed, licensed corpus spanning the three categories
+  (screen_recording / video_clip / motion_graphics) × a few durations × the
+  target-size ladder. Run `fovea-bench run --engines ffmpeg-palette,gifski,
+  gifsicle-lossy,fovea`. Commit the **results table** (CSV/JSON `meta` captures
+  versions) and a short written readout per category.
+- **Risks:** clip licensing; the MS-SSIM primary metric is itself unreliable for
+  color (see 3.5) so treat the table as *directional* until M2; report SSIM/etc.
+  as secondary context only.
+- **Done when:** `fovea-bench run` produces a reproducible per-clip/per-target
+  table and we can state, per category, where Fovea wins/ties/loses at equal size.
 
-**M4 — service/UI productionization (§13.8 async worker split):**
-API (enqueue) + worker (encode) + Redis (queue/job state) + S3-compatible object
-storage (R2/S3 via env). **Requires the user to provision** Redis + a bucket +
-a second Railway service. Build with a graceful in-process fallback so a redeploy
-never breaks. Needed because encodes are CPU-heavy and shouldn't hold a web worker.
+### 8.2 Quick wins / polish (incremental, low-risk)
+- **Per-output `priority`:** today the frontend sends `priority: params.priority`
+  for all outputs, so changing the GIF's Frames-vs-color also moves the sticker.
+  Make it per-output state in `App.svelte` (the orchestrator already reads
+  `spec.priority or params.priority`, so backend is ready).
+- **Surface "invisible" mode in the UI:** `encoder.encode(mode="invisible")` finds
+  the smallest perceptually-lossless size and reports it, but the live app only
+  uses `cap`. Add a "shrink until invisible" option that returns + shows the
+  achieved size (spec's two operating modes).
+- **Surface honesty reporting:** `EncodeReport` has `loss_locus` (worst frame +
+  region hint), `stopped_early`, `stop_reason`, `warnings`. The UI shows only
+  `notes`. Show "stayed invisible vs traded, and where" prominently.
+- **gifski in the image (optional):** add via a pinned release binary or a
+  `rust:` builder stage; enables the opaque video→GIF path. Fovea works without it.
+- **Tune defaults from data:** `_color_floor_for` (smooth=0/balanced=64/sharp=160)
+  and `FOVEA_BUDGET_USE` (0.93) were set by eye; recalibrate against the corpus.
+- **Anytime deadline through the bridge:** `_run_fovea`'s multi-encode loop has no
+  *global* wall-clock cap (only per-encode `FOVEA_BUDGET_SECONDS`). Thread a job
+  deadline through `gif_encode`/`gif_encode_compare` so a pathological clip can't
+  run for minutes (matters more after M4 metering).
 
-**M5 — learned warm-start (predict good lever settings to cut encode time) +
-spec-compliance hardening.**
+### 8.3 M2 — learned, motion-aware perceptual metric (the quality unlock)
+- **Why (the single most important scope):** MS-SSIM **cannot see banding** and
+  rates a smooth-but-banded frame as *closer* than a dithered one (3.5). Because
+  the judge is untrustworthy, we **cannot let `guided_search` optimize quality
+  directly** — so the whole GIF budget logic in `fovea_gif._run_fovea` is a
+  hand-tuned heuristic (color floors + budget-fill). A metric that matches human
+  preference lets us **delete that heuristic** and have the search choose the
+  frames-vs-color point by actually minimizing perceived distortion (with the
+  user's `priority` as a weight, not a hardcoded floor).
+- **Where it plugs in:** implement a `Metric` subclass (e.g.
+  `encoder/metrics/learned.py::LearnedMetric`) with `distance(reference,
+  candidate) -> DistanceResult` and its own calibrated `invisible_threshold`;
+  register it in `encoder/metrics/__init__.py::default_metric()`. **No other code
+  changes** — `guided_search`, `encode()`, and the bench all consume whatever the
+  registry returns. Then simplify `_run_fovea` to lean on the metric.
+- **Approach:** a small CNN in the spirit of **GIFnets' BandingNet** (Yoo et al.,
+  CVPR 2020) **extended to the temporal dimension** (penalize flicker/choppiness,
+  not just per-frame banding). Inputs = aligned (reference, candidate) frame
+  stacks; output = scalar distance. Train in **PyTorch**, export to **ONNX**, run
+  in-loop with **onnxruntime** (already a backend dependency — so the runtime
+  image needs *no* torch). Operate on luma + a small color term; consider a
+  downscaled proxy for in-loop speed and full-res only for the final report.
+- **Training data:** pairs of (source, two equal-size encodings) with human
+  preference labels ("which looks closer to the source"), generated by sweeping
+  levers (colors, dither mode, frame count, lossy) on the corpus, plus synthetic
+  banding/flicker positives. Small, structured pairwise studies (spec §9).
+- **Validation (standing, not one-time):** the metric is trusted only to the
+  extent its pairwise rankings agree with held-out human preference; disagreement
+  is a **defect to fix, not a number to chase**. Keep MS-SSIM / SSIMULACRA2 as
+  sanity references.
+- **Risks:** the **biggest research risk in the project** (spec §9, §14). A weak
+  or gameable judge silently degrades everything. Data collection is real work.
+- **Done when:** pairwise rankings clear the agreed human-agreement threshold on a
+  held-out set; swapping it in measurably improves blind quality at equal size on
+  the corpus (spec §11 gate); and `_run_fovea` can drop its color-floor/budget-fill
+  heuristic in favor of metric-driven optimization.
 
-**Benchmark (M0) is built but unused:** drop real clips into
-`bench/corpus/clips/` (gitignored) and run `fovea-bench run` to start *measuring*
-gains vs gifski/gifsicle/ffmpeg. Nothing should be claimed "better" without this.
+### 8.4 M3 — native internals (the IP frontier; replace external engines)
+These are new `Engine` implementations (`encoder/core/engines.py::Engine` ABC) +
+new `LeverState` fields (`encoder/core/levers.py`), reusing `guided_search`
+unchanged. They need a **native GIF writer** (Python first, then Rust) because
+ffmpeg emits a single global palette and can't express the structures below.
+**Each needs M2** to judge its rate-distortion tradeoffs honestly.
+
+- **8.4.a Region-local palettes — the lever that breaks the frames-vs-color
+  frontier.** GIF allows **multiple image blocks per displayed frame, each with
+  its own local ≤256-color table** (almost no encoder uses this). Tile a frame and
+  give busy/distinct regions their own palette → far more *effective* colors per
+  frame **without dropping a single frame**. This directly dissolves the
+  washout-vs-smoothness tension we fought all session (e.g. all 29 frames *and*
+  rich color at 512KB). New levers: tile grid, per-tile palette size, a
+  when-to-tile RD decision (pay the per-block overhead — descriptor + LZW reset +
+  up to ~768B palette — only when fidelity gain > cost). **Open question (spec
+  §14):** how often tiling actually pays off — empirical, gate per spec §11. Verify
+  multi-block frames render correctly across browsers/Discord/Slack.
+- **8.4.b Perceptual (sub-threshold) frame reuse.** GIF's only interframe trick:
+  with "do not dispose," a later frame redraws only changed pixels and marks the
+  rest transparent (nearly free). gifsicle already does this for **exact** matches;
+  our novel extension is to reuse a pixel when the change is **below the visible
+  threshold** (needs M2's perceptual model). Compounds: more unchanged pixels →
+  larger flat regions → better LZW. Implement as a frame-diff pass producing
+  transparency masks fed to the native writer. **Biggest win on partial-motion**
+  (screen recordings, talking heads); small on full-frame motion (honest bound).
+- **8.4.c Joint RD-LZW + dithering co-tuning.** gifsicle `--lossy` (approximate run
+  matching) shrinks the file; *light* lossy increases run redundancy that partly
+  pays back the size cost dithering adds — so co-tune lossy strength **with**
+  dither and colors against the perceptual judge, never past visible smearing.
+  Make lossy-LZW a first-class lever in the native writer (today it's only a
+  secondary gifsicle path).
+- **8.4.d Rust core.** Once the native writer + reuse + local palettes are proven
+  in Python, move the hot loops (LZW, palette quantization, frame diff, region
+  segmentation) to **Rust via PyO3/maturin**, mirroring gifski/libimagequant.
+  Multi-stage Dockerfile (rust builder → slim runtime).
+- **Done when:** measured, repeatable quality-per-byte win over M1 on the corpus
+  (strongest on partial-motion), each lever added behind the spec §11 gate, output
+  still spec-compliant across target players.
+
+### 8.5 M4 — async worker split + service productionization (spec §13.8)
+- **Why:** encodes are CPU-heavy (seconds–minutes, and **growing** with the
+  budget-fill loop, the comparison double-encode, and M3). Today they run in the
+  in-process `ThreadPoolExecutor` (`main.py::PIPELINE_EXECUTOR`) — which holds a
+  web worker for the whole job, relies on the ephemeral container FS, can't scale
+  across replicas, and lives under a 120s client watchdog. §13.8 mandates a split.
+- **Target topology (two services from one image):**
+  - **API** (FastAPI): accept upload → write input to object storage → enqueue a
+    job (storage keys + params) → return `job_id`; status endpoint reads job state;
+    result endpoint hands a storage download URL. Returns in ms, never encodes.
+  - **Worker**: pull job → read input from storage → run `orchestrator.process`
+    (Fovea) → write outputs to storage → update status + `EncodeReport` in the
+    store.
+  - **Redis** (one-click on Railway): job queue (**RQ** default; Celery optional)
+    + small status store `{job_id, status, result_keys, report}`.
+  - **Object storage**: S3-compatible via `boto3`, configured by env
+    (`S3_ENDPOINT/BUCKET/KEY/SECRET`) so it works with **Cloudflare R2 / AWS S3 /
+    MinIO**. Payloads carry **storage keys, not file paths**.
+  - **Progress**: worker → Redis pub/sub → API SSE (replaces the in-process
+    `asyncio.Queue` in `jobs.py`); keep the existing SSE client contract.
+- **Provisioning the USER must do (cannot be coded):** create the Redis service, a
+  storage bucket + credentials, and a **second Railway service** (worker start
+  command) from this repo; set the env vars/secrets.
+- **Build with a graceful fallback:** if `REDIS_URL`/storage env are unset, stay in
+  **today's in-process synchronous mode** — so a redeploy never breaks before the
+  user provisions anything.
+- **Also in scope:** enforce **input caps** at upload (max file size / resolution /
+  duration / frame count — `encoder.core.frames.InputCaps` exists; surface via
+  ffprobe up front) to bound memory/time/cost; honor a **per-job wall-clock
+  budget** end-to-end (the encoder's `Budget` supports it; thread a deadline
+  through the bridge).
+- **Files:** split `main.py` into api + worker entrypoints; add `storage.py` and a
+  queue module; Dockerfile two start commands; a second-service config in/alongside
+  `railway.json`; an env-config module (nothing hardcoded).
+- **Risks:** provisioning friction; progress streaming across services; metered
+  compute cost. **Done when:** the API/worker/queue/storage topology runs on
+  Railway, long encodes never block a request, progress works, and the in-process
+  fallback still works with no infra.
+
+### 8.6 M5 — learned warm-start + spec-compliance hardening
+- **Learned warm-start:** a small model predicting good *starting* lever settings
+  (colors/frames/dither) from cheap clip features (resolution, motion, color
+  complexity, duration) so most of the search is skipped — directly cutting the
+  multi-encode cost that makes M4 necessary. Layer on **after** M2/M3 are proven
+  (spec §10); it's a speed optimization, not a prerequisite.
+- **Spec-compliance hardening:** a compliance test suite over edge cases —
+  disposal methods, 1-bit transparency, loop counts, very-short-delay clamping,
+  odd dimensions, single-frame, huge frame counts, exotic source formats — with
+  playback verification across browsers / Discord / Slack / email. **Especially
+  important once M3** emits non-trivial structures (multi-block frames, sub-
+  threshold transparency). **Done when:** the suite passes and the encode-time
+  target is met.
+
+### 8.7 Benchmark is the gate, not an afterthought
+`bench/` (M0) is built but **unused**. It is the instrument for every claim above:
+add real clips, run `fovea-bench run` with the `fovea` engine included, and keep
+the table current. Per spec §11, a lever or model ships only if it measurably beats the
+best baseline at equal size (or matches quality at smaller size) across the corpus.
+
+### 8.8 Dependency graph / suggested order
+1. **M0 activation (§8.1)** — cheap; unlocks measurement; gates everything else.
+2. **Quick wins (§8.2)** — per-output priority, invisible mode, honesty surfacing,
+   gifski, the global deadline; ship incrementally.
+3. **M2 metric (§8.3)** — the quality unlock; **prerequisite** for trustworthy M3
+   RD decisions and for replacing the budget-fill heuristic.
+4. **M3 internals (§8.4)** — region-local palettes + perceptual frame reuse + joint
+   RD-LZW, then the Rust core. Needs M2 to judge tradeoffs honestly.
+5. **M4 async split (§8.5)** — increasingly necessary as encode cost grows (M3) and
+   for scale; can proceed in **parallel** (it's infra) whenever timeouts/scale
+   demand and the user provisions Redis + storage + a worker service.
+6. **M5 (§8.6)** — warm-start speedups + compliance hardening once internals exist.
 
 ---
 
