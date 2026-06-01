@@ -28,6 +28,10 @@ def _v(x):
     return x.value if hasattr(x, "value") else x
 
 
+def _sha1(data: bytes) -> str:
+    return hashlib.sha1(data).hexdigest()[:12]
+
+
 def _matte_key(source: Source, params) -> tuple:
     return (
         hashlib.sha1(source.data).hexdigest()[:16],
@@ -106,6 +110,9 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
             "offset_y": spec.offset_y if spec.offset_y is not None else params.offset_y,
             "fit_mode": spec.fit_mode if spec.fit_mode is not None else params.fit_mode,
         })
+        log.info("audit.output.budget", type=otype, requested_max_bytes=spec.max_bytes,
+                 budget=budget, hard_limit=hard_limit, requested_max_dim=spec.max_dim,
+                 square_size=out_size, gif_max_dim=out_max_dim)
         fr, de = base_frames, delays
         if animated_src and len(fr) > prof["frame_cap"]:
             fr, de = encode.even_subsample(fr, de, prof["frame_cap"])
@@ -141,6 +148,14 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                             fitted, src_de, budget=budget, max_colors=eff.max_colors,
                             fps_cap=prof.get("fps_cap", 24), notes=notes)
                         comparison["baseline_output"] = f"{otype}__cmp"
+                        log.info(
+                            "audit.gif.compare", type=otype, primary="fovea",
+                            fovea_bytes=len(data), fovea_frames=n_frames,
+                            fovea_colors=comparison["fovea"].get("colors"), fovea_sha1=_sha1(data),
+                            legacy_bytes=len(baseline_data),
+                            legacy_frames=comparison["legacy"]["frames"],
+                            legacy_sha1=_sha1(baseline_data),
+                        )
                     except Exception:  # noqa: BLE001 - comparison is best-effort
                         comparison, baseline_data = None, None
                         data, fmt, n_frames, fps = fovea_gif.gif_encode(
