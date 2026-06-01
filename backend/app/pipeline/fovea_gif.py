@@ -4,12 +4,15 @@ The orchestrator's GIF outputs (gif + emoji) route through here. We run Fovea's
 ``encode()`` to hit the byte budget while judging quality perceptually, with the
 legacy ffmpeg path as an automatic fallback.
 
-Auto-balance (default on): keeping *every* frame at a tight size can force a tiny
-palette (washed-out color). So we hold a color floor — keep as many frames as fit
-that floor, and only trim frames when all-frames would crush color. Fovea then
-maximizes colors within the budget on the kept frames. Tunables:
+Auto-balance (default on): keeping *every* frame at a tight size forces a tiny
+palette (washed-out color) and, because palette size jumps in lumps, leaves the
+budget unused. So we iterate: encode, and if we're using well under the budget,
+trim frames a little (which lets a richer palette fit) and re-encode — until the
+budget is actually used. The result is the most frames whose palette fills the
+budget: richer color AND the byte limit put to work. Tunables:
   USE_FOVEA_GIF (on), FOVEA_AUTOBALANCE (on), FOVEA_COLOR_FLOOR (48),
-  FOVEA_BUDGET_SECONDS (25), FOVEA_MAX_ATTEMPTS (16), FOVEA_COMPARE (on).
+  FOVEA_BUDGET_USE (0.90), FOVEA_BUDGET_SECONDS (12), FOVEA_MAX_ATTEMPTS (12),
+  FOVEA_COMPARE (on).
 """
 from __future__ import annotations
 
@@ -90,19 +93,52 @@ def _autobalanced_frames(fitted, delays, budget: int):
 
 
 def _run_fovea(fitted, delays, budget: int):
-    """Auto-balanced Fovea encode -> (bytes, n_frames, output_fps, colors)."""
+    """Budget-filling Fovea encode -> (bytes, n_frames, output_fps, colors).
+
+    Keeping every frame at a tight size caps the palette (washout) and leaves the
+    budget unused because palette size jumps in lumps. So we iterate: encode, and
+    if we're using well under the budget, trim frames a little (which lets a richer
+    palette fit) and re-encode — until the budget is actually used or we hit the
+    frame floor. The result is the most frames whose palette fills the budget.
+    """
+    from .encode import even_subsample
+
+    total = len(fitted)
+    target_use = float(os.getenv("FOVEA_BUDGET_USE", "0.90"))
+    seconds = float(os.getenv("FOVEA_BUDGET_SECONDS", "12"))
+    attempts = int(os.getenv("FOVEA_MAX_ATTEMPTS", "12"))
+
+    # Start from the auto-balance estimate (leaves room for the color floor).
+    work_f, work_d = _autobalanced_frames(fitted, delays, budget) if _autobalance_enabled() else (fitted, delays)
+    best = None  # (data, n_frames, fps, colors, usage)
+    for i in range(5):
+        data, fps, colors = _encode_once(work_f, work_d, budget, seconds, attempts)
+        usage = (len(data) / budget) if budget else 1.0
+        if best is None or usage > best[4]:
+            best = (data, len(work_f), fps, colors, usage)
+        log.info("fovea.budgetfill iter=%d frames=%d colors=%s bytes=%d usage=%.2f",
+                 i, len(work_f), colors, len(data), usage)
+        if (not _autobalance_enabled() or usage >= target_use
+                or (colors and colors >= 256) or len(work_f) <= MIN_FRAMES):
+            break
+        nf = max(MIN_FRAMES, int(len(work_f) * 0.8))
+        if nf >= len(work_f):
+            break
+        work_f, work_d = even_subsample(list(fitted), list(delays), nf)
+    return best[0], best[1], best[2], best[3]
+
+
+def _encode_once(fitted, delays, budget: int, seconds: float, attempts: int):
+    """One Fovea encode -> (bytes, output_fps, colors)."""
     from encoder import encode as fovea_encode
 
-    work_f, work_d = _autobalanced_frames(fitted, delays, budget)
     td = tempfile.mkdtemp(prefix="fovea_run_")
     try:
         out = os.path.join(td, "o.gif")
         rep = out + ".json"
         res = fovea_encode(
-            list(work_f), target_bytes=budget, mode="cap", delays_ms=list(work_d),
-            max_attempts=int(os.getenv("FOVEA_MAX_ATTEMPTS", "16")),
-            budget_seconds=float(os.getenv("FOVEA_BUDGET_SECONDS", "25")),
-            out_path=out, report_path=rep,
+            list(fitted), target_bytes=budget, mode="cap", delays_ms=list(delays),
+            max_attempts=attempts, budget_seconds=seconds, out_path=out, report_path=rep,
         )
         with open(out, "rb") as fh:
             data = fh.read()
@@ -111,7 +147,7 @@ def _run_fovea(fitted, delays, budget: int):
             colors = json.load(open(rep)).get("lever_setting", {}).get("colors")
         except Exception:  # noqa: BLE001
             pass
-        return data, len(work_f), res.output_fps, colors
+        return data, res.output_fps, colors
     finally:
         shutil.rmtree(td, ignore_errors=True)
 
