@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import threading
@@ -21,6 +22,16 @@ from .models import ProcessParams
 from .pipeline import bg_removal, ingest, orchestrator
 
 log = obs.get_logger("app")
+
+
+def _sha1(data: bytes) -> str:
+    """Short content fingerprint so a downloaded file can be matched to served bytes."""
+    return hashlib.sha1(data).hexdigest()[:12]
+
+
+def _enum(v):
+    return v.value if hasattr(v, "value") else v
+
 
 store = JobStore()
 PIPELINE_EXECUTOR = ThreadPoolExecutor(
@@ -85,6 +96,19 @@ async def process(
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"error": f"Invalid params: {exc}"}, status_code=400)
 
+    log.info(
+        "audit.request",
+        request_id=request_id,
+        remove_bg=parsed.remove_bg,
+        max_fps=parsed.max_fps,
+        max_duration_s=parsed.max_duration_s,
+        outputs=[
+            {"type": _enum(o.type), "max_bytes": o.max_bytes, "max_dim": o.max_dim,
+             "gif_quality": _enum(o.gif_quality), "priority": _enum(o.priority)}
+            for o in (parsed.outputs or [])
+        ],
+    )
+
     try:
         if file is not None:
             data = await file.read()
@@ -113,6 +137,9 @@ async def process(
             for otype, data, fmt, meta in outs:
                 job.outputs[otype] = {"bytes": data, "fmt": fmt, "meta": meta.model_dump()}
                 job.order.append(otype)
+                log.info("audit.store", request_id=request_id, job_id=job_id, key=otype,
+                         bytes=len(data), fmt=fmt, sha1=_sha1(data),
+                         role=("baseline" if "__cmp" in otype else "primary"))
             job.status = "done"
             event = {
                 "type": "result",
@@ -158,13 +185,16 @@ async def events(job_id: str):
     )
 
 
-def _serve(out: dict, download: bool, name: str) -> Response:
+def _serve(out: dict, download: bool, name: str, *, job_id: str | None = None,
+           key: str | None = None) -> Response:
     fmt = out["fmt"]
     media = "image/gif" if fmt == "GIF" else "image/png"
     ext = "gif" if fmt == "GIF" else "png"
     headers = {"Cache-Control": "no-store"}
     if download:
         headers["Content-Disposition"] = f'attachment; filename="{name}.{ext}"'
+    log.info("audit.serve", job_id=job_id, key=key, bytes=len(out["bytes"]),
+             sha1=_sha1(out["bytes"]), fmt=fmt, download=bool(download))
     return Response(content=out["bytes"], media_type=media, headers=headers)
 
 
@@ -173,7 +203,8 @@ async def result(job_id: str, download: bool = False):
     job = store.get(job_id)
     if not job or not job.first:
         return JSONResponse({"error": "Result not ready"}, status_code=404)
-    return _serve(job.first, download, "my-sticker")
+    return _serve(job.first, download, "my-sticker", job_id=job_id,
+                  key=(job.order[0] if job.order else None))
 
 
 @app.get("/api/result/{job_id}/{output}")
@@ -187,6 +218,8 @@ async def result_typed(job_id: str, output: str, download: bool = False):
         buf = _io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             for t in job.order:
+                if "__cmp" in t:  # comparison baseline is served on demand, not bundled
+                    continue
                 o = job.outputs[t]
                 ext = "gif" if o["fmt"] == "GIF" else "png"
                 z.writestr(f"discord-{t}.{ext}", o["bytes"])
@@ -195,7 +228,7 @@ async def result_typed(job_id: str, output: str, download: bool = False):
     out = job.outputs.get(output)
     if not out:
         return JSONResponse({"error": "Unknown output"}, status_code=404)
-    return _serve(out, download, f"my-{output}")
+    return _serve(out, download, f"my-{output}", job_id=job_id, key=output)
 
 
 @app.get("/health")

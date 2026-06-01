@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fovea"
+version = "0.1.0"
+description = "Perceptually-lossless GIF encoder: best-looking .gif under a hard size cap, every frame kept."
+readme = "docs/fovea-spec.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "Pillow>=10.3",
+    "PyYAML>=6.0",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+fovea = "encoder.cli.main:main"
+fovea-bench = "bench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["encoder*", "bench*"]
+exclude = ["tests*", "docs*", "backend*", "frontend*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

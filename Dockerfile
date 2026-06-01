@@ -16,9 +16,12 @@ ENV PYTHONUNBUFFERED=1 \
     STATIC_DIR=/app/frontend/dist
 
 # ffmpeg = decode any video/animated; pngquant = APNG color optimization;
-# apngasm = inter-frame APNG compression (more frames under 512KB); libheif = HEIC
+# apngasm = inter-frame APNG compression (more frames under 512KB); libheif = HEIC;
+# gifsicle = a Fovea encoder engine (lossy-LZW GIF post-pass). gifski is optional
+# (no apt package); add it via a release binary or `cargo install gifski` if the
+# opaque video->GIF path is needed — Fovea degrades gracefully without it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg pngquant apngasm libheif1 \
+        ffmpeg pngquant apngasm libheif1 gifsicle \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -26,6 +29,10 @@ COPY backend/requirements.txt ./
 RUN pip install -r requirements.txt
 
 COPY backend/app ./app
+# Fovea encoder package (the backend GIF path imports `encoder`). Its deps
+# (numpy/Pillow/pydantic) are already satisfied by backend/requirements.txt;
+# /app is on sys.path so `import encoder` resolves without a separate install.
+COPY encoder ./encoder
 COPY --from=frontend /fe/dist ./frontend/dist
 
 # Bake the default background-removal model into the image so the first
