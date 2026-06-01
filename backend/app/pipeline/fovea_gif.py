@@ -13,10 +13,12 @@ The budget is split between frames (smoothness) and colors (richness) per a
   * sharp    — color first: trim frames for the richest palette, then add frames
                back to use the budget.
 
-Either way we never knowingly leave budget on the table: after choosing a palette
-we add frames back at that palette until the byte limit is used. Tunables:
+Trimming never drops below an fps floor (no 2-fps slideshows). Either way we never
+knowingly leave budget on the table: after choosing a palette we add frames back at
+that palette+dither until the byte limit is used. Tunables:
   USE_FOVEA_GIF (on), FOVEA_AUTOBALANCE (on), FOVEA_BUDGET_USE (0.93),
-  FOVEA_BUDGET_SECONDS (12), FOVEA_MAX_ATTEMPTS (12), FOVEA_COMPARE (on).
+  FOVEA_BUDGET_SECONDS (12), FOVEA_MAX_ATTEMPTS (12), FOVEA_COMPARE (on),
+  FOVEA_MIN_FPS (8), FOVEA_MIN_FPS_SHARP (5).
 """
 from __future__ import annotations
 
@@ -122,6 +124,7 @@ def _encode_once(fitted, delays, budget: int, seconds: float, attempts: int, mod
             colors = (rj.get("lever_setting") or {}).get("colors")
             report = {
                 "mode": mode,
+                "dither": (rj.get("lever_setting") or {}).get("dither"),
                 "perceptually_lossless": rj.get("perceptually_lossless"),
                 "perceptual_distance": rj.get("perceptual_distance"),
                 "under_target": rj.get("under_target"),
@@ -136,8 +139,11 @@ def _encode_once(fitted, delays, budget: int, seconds: float, attempts: int, mod
         shutil.rmtree(td, ignore_errors=True)
 
 
-def _encode_fixed_colors(fitted, delays, colors: int):
-    """Encode at a FIXED palette size (so we can add frames while holding color)."""
+def _encode_fixed_colors(fitted, delays, colors: int, dither: str | None = "sierra2_4a"):
+    """Encode at a FIXED palette + dither (so we can add frames while holding color).
+
+    Matching the chosen candidate's dither matters: re-encoding at a different dither
+    changes the byte size, which would break the frame-fill's size estimate."""
     from encoder.core.engines import FfmpegPaletteEngine, prepare_context
     from encoder.core.frames import frames_from_list
     from encoder.core.levers import LeverState
@@ -146,7 +152,8 @@ def _encode_fixed_colors(fitted, delays, colors: int):
     try:
         ctx = prepare_context(frames_from_list(list(fitted), list(delays)), 1.0, td)
         out = os.path.join(td, "f.gif")
-        eo = FfmpegPaletteEngine().encode(ctx, LeverState(colors=colors, dither="sierra2_4a"), out)
+        eo = FfmpegPaletteEngine().encode(
+            ctx, LeverState(colors=colors, dither=dither or "sierra2_4a"), out)
         with open(out, "rb") as fh:
             return fh.read(), eo.size_bytes, ctx.fps
     finally:
@@ -154,7 +161,7 @@ def _encode_fixed_colors(fitted, delays, colors: int):
 
 
 def _fill_frames_at_colors(fitted, delays, budget: int, base_frames: int, base_size: int,
-                           colors: int):
+                           colors: int, dither: str | None = None):
     """Add frames at a fixed palette to use the budget -> (data, n, fps, usage) or None.
 
     GIF size is ~linear in frame count at a fixed palette, so estimate the largest
@@ -171,7 +178,7 @@ def _fill_frames_at_colors(fitted, delays, budget: int, base_frames: int, base_s
         if f2 <= base_frames:
             continue
         wf, wd = even_subsample(list(fitted), list(delays), f2)
-        data, size, fps = _encode_fixed_colors(wf, wd, colors)
+        data, size, fps = _encode_fixed_colors(wf, wd, colors, dither)
         if size <= budget:
             return data, f2, fps, size / budget
     return None
@@ -214,6 +221,14 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
                  "using cap budget-fill", total, colors, len(data))
 
     floor = _color_floor_for(priority)
+    # fps floor: never trim into a slideshow. 'sharp' may trim further for richer color
+    # than the smoother modes, but both stay above a watchable frame rate. Duration is
+    # preserved across subsampling, so frames / duration == output fps.
+    duration_s = (sum(delays) / 1000.0) if delays and any(delays) else (total / 10.0)
+    min_fps = float(os.getenv("FOVEA_MIN_FPS_SHARP", "5") if priority == "sharp"
+                    else os.getenv("FOVEA_MIN_FPS", "8"))
+    min_n = (max(MIN_FRAMES, min(total, int(round(min_fps * duration_s))))
+             if duration_s > 0 else MIN_FRAMES)
 
     # 1. All frames at the richest palette the budget allows.
     data, fps, colors, report = _encode_once(
@@ -223,29 +238,51 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
     log.info("fovea.fill mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
              priority, total, colors, len(data), usage)
 
-    # 2. Color-seeking trim (balanced/sharp): drop frames until the palette reaches the
-    #    mode's richness floor. Skipped for 'smooth' or when all frames are already rich.
-    if floor and (colors or 0) < floor and (colors or 0) < 256:
+    # 2. Color-seeking trim (balanced/sharp): drop frames toward the palette floor, but
+    #    never below the fps floor (no slideshows). Skipped for 'smooth' or when the
+    #    palette is already rich enough.
+    # 2a. Color-seeking trim (balanced/sharp): drop frames toward the palette floor,
+    #     clamped at the fps floor so we never produce a slideshow.
+    if floor and (colors or 0) < floor and (colors or 0) < 256 and total > min_n:
         f = total
-        for _ in range(5):
+        for _ in range(6):
             if deadline is not None and (deadline - time.monotonic()) < 1.0:
                 break  # out of time — keep the best candidate so far
-            f = max(MIN_FRAMES, int(f * 0.72))
+            f = max(min_n, int(f * 0.72))   # clamp: never step past the fps floor
             wf, wd = even_subsample(list(fitted), list(delays), f)
             d, fp, c, rep = _encode_once(
                 wf, wd, budget, _seconds_left(deadline, per_encode), attempts)
             log.info("fovea.fill mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
                      priority, f, c, len(d), (len(d) / budget) if budget else 1.0)
             chosen = (d, f, fp, c, (len(d) / budget) if budget else 1.0, rep)
-            if (c or 0) >= floor or (c or 0) >= 256 or f <= MIN_FRAMES:
+            if f <= min_n or (len(d) <= budget and ((c or 0) >= floor or (c or 0) >= 256)):
                 break
 
+    # 2b. Fit rescue: if even the fps-floor result overshoots the budget, keep trimming
+    #     below the floor toward MIN_FRAMES — fitting the hard byte limit is mandatory;
+    #     the fps floor is only a preference.
     data, n, fps, colors, usage, report = chosen
-    # 3. Frame-fill: top off the budget by adding frames back at the chosen palette
+    if len(data) > budget and n > MIN_FRAMES:
+        f = n
+        for _ in range(4):
+            if deadline is not None and (deadline - time.monotonic()) < 1.0:
+                break
+            f = max(MIN_FRAMES, int(f * 0.72))
+            wf, wd = even_subsample(list(fitted), list(delays), f)
+            d, fp, c, rep = _encode_once(
+                wf, wd, budget, _seconds_left(deadline, per_encode), attempts)
+            log.info("fovea.fitrescue mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
+                     priority, f, c, len(d), (len(d) / budget) if budget else 1.0)
+            chosen = (d, f, fp, c, (len(d) / budget) if budget else 1.0, rep)
+            if len(d) <= budget or f <= MIN_FRAMES:
+                break
+        data, n, fps, colors, usage, report = chosen
+    # 3. Frame-fill: top off the budget by adding frames back at the chosen palette+dither
     #    (more frames = smoother, no extra washout). Never leave budget on the table.
     if (priority != "smooth" and usage < target and n < total and colors
             and (deadline is None or (deadline - time.monotonic()) > 1.0)):
-        filled = _fill_frames_at_colors(fitted, delays, budget, n, len(data), int(colors))
+        filled = _fill_frames_at_colors(fitted, delays, budget, n, len(data), int(colors),
+                                        report.get("dither"))
         if filled is not None and filled[3] > usage:
             data, n, fps, usage = filled
             log.info("fovea.framefill mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
@@ -327,9 +364,6 @@ def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24,
     try:
         fovea_data, fovea_n, fovea_fps, fovea_colors, report = _run_fovea(
             fitted, delays, int(budget), priority, "cap", deadline)
-        fpath = os.path.join(td, "fovea.gif")
-        with open(fpath, "wb") as fh:
-            fh.write(fovea_data)
 
         sig = _legacy_sig(fitted, delays, budget, max_colors, fps_cap)
         cached = _legacy_get(sig)
@@ -343,14 +377,17 @@ def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24,
         with open(lpath, "wb") as fh:
             fh.write(legacy_data)
 
+        # Single source of truth for the Fovea side: the encoder's own report — the same
+        # numbers the honesty line shows — so the comparison badge can never contradict
+        # it. Only the legacy baseline needs its own score (it has no Fovea report).
         metric = default_metric()
-        fdist = _aligned_distance(metric, fitted, delays, fpath, fovea_n)
         ldist = _aligned_distance(metric, fitted, delays, lpath, legacy_n)
-        lossless = fdist <= metric.invisible_threshold
+        fdist = report.get("perceptual_distance")
         comparison = {
             "metric": metric.name,
             "fovea": {"bytes": len(fovea_data), "frames": fovea_n, "colors": fovea_colors,
-                      "distance": round(float(fdist), 5), "perceptually_lossless": bool(lossless)},
+                      "distance": (round(float(fdist), 5) if fdist is not None else None),
+                      "perceptually_lossless": bool(report.get("perceptually_lossless"))},
             "legacy": {"bytes": len(legacy_data), "frames": int(legacy_n),
                        "distance": round(float(ldist), 5)},
         }
