@@ -32,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     lst = sub.add_parser("list", help="print the clips x targets that would run")
     _add_common(lst)
+
+    je = sub.add_parser("judge-eval", help="evaluate perceptual metric(s) on the learned-judge dataset")
+    je.add_argument("--metrics", default="msssim,learned",
+                    help="comma list of metric names to compare (default: msssim,learned)")
+    je.add_argument("--data", default=os.path.join("bench", "corpus", "dataset"))
+    je.add_argument("--out-dir", default=os.path.join("bench", "out"))
     return p
 
 
@@ -80,9 +86,19 @@ def _cmd_list(args) -> int:
     return 0
 
 
+def _cmd_judge_eval(args) -> int:
+    from .judge_eval import run_judge_eval
+
+    metrics = [m.strip() for m in args.metrics.split(",") if m.strip()]
+    run_judge_eval(metrics, args.data, args.out_dir)
+    print(f"\nwrote: {os.path.join(args.out_dir, 'judge_eval.md')} and judge_eval.json")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"run": _cmd_run, "validate": _cmd_validate, "list": _cmd_list}[args.command](args)
+    return {"run": _cmd_run, "validate": _cmd_validate, "list": _cmd_list,
+            "judge-eval": _cmd_judge_eval}[args.command](args)
 
 
 if __name__ == "__main__":

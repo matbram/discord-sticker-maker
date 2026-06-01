@@ -11,6 +11,8 @@ dist/
 # fovea encoder
 bench/out/
 bench/corpus/clips/
+bench/corpus/train_clips/
+bench/corpus/dataset/
 
 # node / frontend build
 frontend/node_modules/

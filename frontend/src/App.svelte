@@ -26,6 +26,7 @@
   let view = 'idle' // idle | choosing | working | done | error
   let params = defaultParams()
   let source = null
+  let sourceId = null // server-side handle so regenerates skip re-uploading the source
   let urlInput = ''
   let dragging = false
 
@@ -61,6 +62,17 @@
   }
   let limits = defaultLimits()
 
+  // Per-output encode options (priority + cap/invisible mode), independent per format
+  // so the GIF's frames-vs-color never moves the sticker/emoji.
+  function defaultOutopts() {
+    return {
+      gif: { priority: 'balanced', mode: 'cap' },
+      sticker: { priority: 'balanced', mode: 'cap' },
+      emoji: { priority: 'balanced', mode: 'cap' }
+    }
+  }
+  let outopts = defaultOutopts()
+
   let jobId = null
   let doneJob = null // job whose results are actually ready (drives preview URLs)
   let uploadPct = 0
@@ -79,12 +91,18 @@
 
   const PARAMS_KEY = 'dsm_params_v3'
   const LIMITS_KEY = 'dsm_limits_v1'
+  const OUTOPTS_KEY = 'dsm_outopts_v1'
   onMount(() => {
     try { const s = JSON.parse(localStorage.getItem(PARAMS_KEY) || 'null'); if (s) params = { ...defaultParams(), ...s } } catch (_) {}
     try { const l = JSON.parse(localStorage.getItem(LIMITS_KEY) || 'null'); if (l) limits = { ...defaultLimits(), ...l } } catch (_) {}
+    try {
+      const o = JSON.parse(localStorage.getItem(OUTOPTS_KEY) || 'null')
+      if (o) { const d = defaultOutopts(); for (const k of Object.keys(d)) outopts[k] = { ...d[k], ...(o[k] || {}) } }
+    } catch (_) {}
   })
   function persistParams() { try { localStorage.setItem(PARAMS_KEY, JSON.stringify(params)) } catch (_) {} }
   function persistLimits() { try { localStorage.setItem(LIMITS_KEY, JSON.stringify(limits)) } catch (_) {} }
+  function persistOutopts() { try { localStorage.setItem(OUTOPTS_KEY, JSON.stringify(outopts)) } catch (_) {} }
   function fmtBytes(n) { return n == null ? '—' : (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`) }
 
   function armWatchdog() {
@@ -116,6 +134,7 @@
     if (!file) return
     clearSourceUrl()
     source = { file }
+    sourceId = null
     sourceIsVideo = (file.type || '').startsWith('video/')
     sourceUrl = URL.createObjectURL(file)
     params = { ...params, trim_start_s: 0, max_duration_s: 4.0 }
@@ -127,6 +146,7 @@
     const url = urlInput.trim(); if (!url) return
     clearSourceUrl()
     source = { url }
+    sourceId = null
     sourceIsVideo = /\.(mp4|mov|webm|mkv|avi)(\?|$)/i.test(url)
     sourceUrl = url
     params = { ...params, trim_start_s: 0, max_duration_s: 4.0 }
@@ -139,9 +159,10 @@
     const f = (t) => ({ zoom: framing[t].zoom, offset_x: framing[t].offset_x, offset_y: framing[t].offset_y, fit_mode: framing[t].fit_mode })
     const list = []
     const lim = (t) => ({ max_bytes: limits[t].bytes, max_dim: limits[t].dim })
-    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect, priority: params.priority, ...lim('gif'), ...f('gif') })
-    if (selected.sticker) list.push({ type: 'sticker', priority: params.priority, ...lim('sticker'), ...f('sticker') })
-    if (selected.emoji) list.push({ type: 'emoji', priority: params.priority, ...lim('emoji'), ...f('emoji') })
+    const opt = (t) => ({ priority: outopts[t].priority, mode: outopts[t].mode })
+    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect, ...opt('gif'), ...lim('gif'), ...f('gif') })
+    if (selected.sticker) list.push({ type: 'sticker', ...opt('sticker'), ...lim('sticker'), ...f('sticker') })
+    if (selected.emoji) list.push({ type: 'emoji', ...opt('emoji'), ...lim('emoji'), ...f('emoji') })
     return list
   }
   $: anySelected = selected.sticker || selected.emoji || selected.gif
@@ -159,7 +180,8 @@
     error = { message: '', requestId: '' }
     try {
       const payload = { ...params, outputs: buildOutputs() }
-      const { job_id } = await startProcess(source, payload, (p) => { uploadPct = p })
+      const { job_id, source_id } = await startProcess(source, payload, (p) => { uploadPct = p }, sourceId)
+      if (source_id) sourceId = source_id
       jobId = job_id
       closeStream = subscribeEvents(job_id, onEvent)
       armWatchdog()
@@ -215,7 +237,16 @@
   }
   function onCropChange(e) { applyFraming({ zoom: e.detail.zoom, offset_x: e.detail.offsetX, offset_y: e.detail.offsetY }); scheduleRegen() }
   function setFit(m) { applyFraming({ zoom: 1, offset_x: 0, offset_y: 0, fit_mode: m }); scheduleRegen() }
-  function setPriority(p) { params = { ...params, priority: p }; scheduleRegen() }
+  function setPriority(p) { outopts = { ...outopts, [focusedType]: { ...outopts[focusedType], priority: p } }; persistOutopts(); scheduleRegen() }
+  function setMode(m) { outopts = { ...outopts, [focusedType]: { ...outopts[focusedType], mode: m } }; persistOutopts(); scheduleRegen() }
+  function honestyLine(r) {
+    if (!r) return ''
+    if (r.perceptually_lossless) return '✓ Perceptually lossless — no visible loss at this size.'
+    const lf = r.loss_locus
+    const where = lf && (lf.worst_frame != null) ? ` worst around frame ${lf.worst_frame}` : ''
+    const early = r.stopped_early && r.stop_reason ? ` (stopped early: ${r.stop_reason})` : ''
+    return `Some visible loss to fit the size limit${where}.${early}`
+  }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
   function setLimitBytes(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], bytes: v } }; persistLimits(); scheduleRegen() }
@@ -243,7 +274,7 @@
 
   function reset() {
     if (closeStream) closeStream(); disarmWatchdog(); clearSourceUrl()
-    busy = false; view = 'idle'; source = null; urlInput = ''; sourceUrl = ''; sourceW = 0; sourceH = 0
+    busy = false; view = 'idle'; source = null; sourceId = null; urlInput = ''; sourceUrl = ''; sourceW = 0; sourceH = 0
     outputs = []; jobId = null; doneJob = null
   }
 
@@ -426,12 +457,14 @@
         {#if focusedType === 'gif'}
           <div class="ctl"><span class="ctl-label">Frames vs. color</span>
             <div class="seg three">
-              <button class:on={params.priority === 'smooth'} on:click={() => setPriority('smooth')}>More frames</button>
-              <button class:on={params.priority === 'balanced'} on:click={() => setPriority('balanced')}>Balanced</button>
-              <button class:on={params.priority === 'sharp'} on:click={() => setPriority('sharp')}>Richer color</button>
+              <button class:on={outopts.gif.priority === 'smooth'} on:click={() => setPriority('smooth')}>More frames</button>
+              <button class:on={outopts.gif.priority === 'balanced'} on:click={() => setPriority('balanced')}>Balanced</button>
+              <button class:on={outopts.gif.priority === 'sharp'} on:click={() => setPriority('sharp')}>Richer color</button>
             </div>
           </div>
           <p class="muted-line">More frames = smoother, fewer colors. Richer = fuller color, fewer frames. Both fill your size limit.</p>
+          <label class="toggle"><span>Shrink until invisible</span><input type="checkbox" checked={outopts.gif?.mode === 'invisible'} on:change={(e) => setMode(e.target.checked ? 'invisible' : 'cap')} /></label>
+          <p class="muted-line">Ignore the size target and make the smallest file with no visible loss.</p>
           <div class="ctl"><span class="ctl-label">GIF shape</span>
             <div class="seg three">
               <button class:on={params.gif_aspect === 'square'} on:click={() => setGifAspect('square')}>Square</button>
@@ -442,11 +475,14 @@
         {:else if focusOut?.meta.animated}
           <div class="ctl"><span class="ctl-label">Motion</span>
             <div class="seg three">
-              <button class:on={params.priority === 'smooth'} on:click={() => setPriority('smooth')}>More frames</button>
-              <button class:on={params.priority === 'balanced'} on:click={() => setPriority('balanced')}>Balanced</button>
-              <button class:on={params.priority === 'sharp'} on:click={() => setPriority('sharp')}>Richer</button>
+              <button class:on={outopts[focusedType]?.priority === 'smooth'} on:click={() => setPriority('smooth')}>More frames</button>
+              <button class:on={outopts[focusedType]?.priority === 'balanced'} on:click={() => setPriority('balanced')}>Balanced</button>
+              <button class:on={outopts[focusedType]?.priority === 'sharp'} on:click={() => setPriority('sharp')}>Richer</button>
             </div>
           </div>
+          {#if focusedType === 'emoji'}
+            <label class="toggle"><span>Shrink until invisible</span><input type="checkbox" checked={outopts.emoji?.mode === 'invisible'} on:change={(e) => setMode(e.target.checked ? 'invisible' : 'cap')} /></label>
+          {/if}
         {/if}
 
         <div class="ctl"><span class="ctl-label">Preview on</span>
@@ -469,6 +505,7 @@
           <ul class="checks">
             {#each Object.entries(focusOut.meta.checklist) as [label, ok]}<li class:ok>{ok ? '✓' : '✕'} {label}</li>{/each}
           </ul>
+          {#if focusOut.meta.report}<div class="onote" class:ok={focusOut.meta.report.perceptually_lossless}>{honestyLine(focusOut.meta.report)}</div>{/if}
           {#each focusOut.meta.notes || [] as note}<div class="onote">{note}</div>{/each}
         {/if}
 

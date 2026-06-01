@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import observability as obs
+from . import source_cache
 from .jobs import JobStore
 from .models import ProcessParams
 from .pipeline import bg_removal, ingest, orchestrator
@@ -89,6 +90,7 @@ async def process(
     file: UploadFile | None = File(default=None),
     url: str | None = Form(default=None),
     params: str | None = Form(default=None),
+    source_id: str | None = Form(default=None),
 ):
     request_id = getattr(request.state, "request_id", None) or obs.new_request_id()
     try:
@@ -110,7 +112,15 @@ async def process(
     )
 
     try:
-        if file is not None:
+        source = source_cache.get(source_id) if source_id else None
+        if source is not None:
+            log.info("source_cache.hit", source_id=source_id, bytes=len(source.data))
+        elif source_id and file is None and not url:
+            # Token expired and the client sent nothing to fall back on — ask it to resend.
+            return JSONResponse(
+                {"error": "Source expired; please re-select your file.",
+                 "source_expired": True, "request_id": request_id}, status_code=409)
+        elif file is not None:
             data = await file.read()
             source = ingest.from_bytes(data, file.filename)
         elif url:
@@ -121,6 +131,7 @@ async def process(
         log.warning("process.ingest_rejected", error=str(exc))
         return JSONResponse({"error": str(exc), "request_id": request_id}, status_code=400)
 
+    sid = source_cache.put(source)
     job_id = uuid.uuid4().hex[:12]
     job = store.create(job_id, request_id)
     job.status = "running"
@@ -130,10 +141,14 @@ async def process(
         evt = {"type": "progress", "stage": stage, "message": message, "done": done, "total": total, "level": level}
         loop.call_soon_threadsafe(job.queue.put_nowait, evt)
 
+    # Whole-job wall-clock budget (kept under the client's 120s watchdog) so a
+    # pathological clip can't run for minutes; threaded into the Fovea encode loops.
+    deadline = time.monotonic() + float(os.getenv("FOVEA_JOB_SECONDS", "100"))
+
     def run() -> None:
         obs.bind_request(request_id)
         try:
-            outs = orchestrator.process(source, parsed, emit)
+            outs = orchestrator.process(source, parsed, emit, deadline=deadline)
             for otype, data, fmt, meta in outs:
                 job.outputs[otype] = {"bytes": data, "fmt": fmt, "meta": meta.model_dump()}
                 job.order.append(otype)
@@ -158,7 +173,7 @@ async def process(
             obs.clear_request()
 
     PIPELINE_EXECUTOR.submit(run)
-    return {"job_id": job_id, "request_id": request_id}
+    return {"job_id": job_id, "request_id": request_id, "source_id": sid}
 
 
 @app.get("/api/events/{job_id}")
@@ -170,7 +185,9 @@ async def events(job_id: str):
     async def gen():
         while True:
             try:
-                evt = await asyncio.wait_for(job.queue.get(), timeout=60)
+                # Short keepalive interval so a long, silent encode doesn't look idle
+                # to the platform proxy (which resets idle streams -> client watchdog).
+                evt = await asyncio.wait_for(job.queue.get(), timeout=15)
             except asyncio.TimeoutError:
                 yield ": keepalive\n\n"
                 continue

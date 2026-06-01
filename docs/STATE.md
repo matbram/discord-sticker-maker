@@ -1,10 +1,34 @@
 # Fovea — Project State & Handoff (living document)
 
 > **Read this first when resuming.** It is the canonical "where we are / how it
-> works / what's next." Last updated: end of the build+integration session that
-> wired Fovea into the live Discord-sticker-maker and tuned the GIF budget logic.
+> works / what's next." Last updated: the session that shipped the §8.2 quick wins
+> and built the M2 learned-judge foundation (flag-gated) — see §0 below.
 > Companion docs: `docs/fovea-spec.md` (the why), `docs/architecture.md`,
-> `docs/metrics.md`, `docs/bench.md`, `docs/cli.md`.
+> `docs/metrics.md`, `docs/bench.md`, `docs/cli.md`, `docs/m2-judge.md` (the learned judge).
+
+---
+
+## 0. Recent updates (latest session)
+
+**Quick wins (§8.2) — shipped.** Per-output `priority` (the GIF's Frames-vs-color no
+longer moves the sticker/emoji); an **invisible mode** UI toggle (smallest
+perceptually-lossless size) threaded `OutputSpec.mode` → orchestrator → bridge (invisible
+bypasses the budget-fill); the encoder's **honesty report** (lossless? / loss locus /
+stop reason) now reaches `StickerMeta.report` and the UI; a **warning** when the
+Fovea-vs-standard comparison falls back instead of failing silently; and a **global
+per-job deadline** (`FOVEA_JOB_SECONDS`, default 100s, under the 120s watchdog) threaded
+into the multi-encode loop. *Deferred:* defaults tuning (needs M0).
+
+**M2 learned judge — foundation built, flag-gated** (full writeup: `docs/m2-judge.md`).
+A small ONNX/onnxruntime CNN judge (`encoder/metrics/learned.py`) trained on real
+GitHub-hosted clips + synthetic degradations with *derivable* labels
+(`encoder/metrics/training/`). On held-out clips it scores **100% on the
+dithered-vs-banded case where MS-SSIM sits at chance (50%)** — the exact blind spot that
+forces the bridge's color-floor heuristic (§3.5/§4.3). **OFF by default**
+(`FOVEA_METRIC=learned` to opt in); MS-SSIM stays default and there is a graceful
+fallback when the model/runtime is absent. The `.onnx` is gitignored (reproduce via the
+training pipeline); **not yet wired into the Docker image**, and **human-preference
+validation remains the outstanding gate** before it can become the default.
 
 ---
 

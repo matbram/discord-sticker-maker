@@ -7,22 +7,47 @@ binary adapter if present, otherwise the always-available pure-numpy
 """
 from __future__ import annotations
 
+import os
+
 from .base import DistanceResult, Metric
 
 __all__ = ["DistanceResult", "Metric", "default_metric", "available_metrics", "get_metric"]
+
+
+def _try_learned() -> Metric | None:
+    """The learned judge if its model + onnxruntime are present, else None."""
+    from . import learned
+
+    if not learned.model_available():
+        return None
+    try:
+        return learned.LearnedMetric()
+    except Exception:  # noqa: BLE001 - a bad model must never break the encoder
+        import logging
+
+        logging.getLogger("fovea.metrics").warning("learned metric failed to load; using MS-SSIM")
+        return None
 
 
 def default_metric() -> Metric:
     from . import external
     from .perceptual import PerceptualMetric
 
+    # Opt-in only: MS-SSIM stays the default until the learned judge is proven out.
+    if os.getenv("FOVEA_METRIC", "").lower() == "learned":
+        lm = _try_learned()
+        if lm is not None:
+            return lm
     return external.best_available() or PerceptualMetric()
 
 
 def available_metrics() -> list[str]:
-    from . import external
+    from . import external, learned
 
-    return ["msssim", "msssim+temporal"] + external.available_external()
+    names = ["msssim", "msssim+temporal"]
+    if learned.model_available():
+        names.append("learned")
+    return names + external.available_external()
 
 
 def get_metric(name: str | None) -> Metric:
@@ -33,6 +58,11 @@ def get_metric(name: str | None) -> Metric:
         return default_metric()
     if name in ("msssim", "msssim+temporal"):
         return PerceptualMetric()
+    if name == "learned":
+        lm = _try_learned()
+        if lm is not None:
+            return lm
+        raise ValueError("metric 'learned' requested but model/onnxruntime unavailable")
     from . import external
 
     if name in external.available_external():
