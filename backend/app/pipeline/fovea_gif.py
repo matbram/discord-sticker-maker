@@ -4,15 +4,19 @@ The orchestrator's GIF outputs (gif + emoji) route through here. We run Fovea's
 ``encode()`` to hit the byte budget while judging quality perceptually, with the
 legacy ffmpeg path as an automatic fallback.
 
-Auto-balance (default on): keeping *every* frame at a tight size forces a tiny
-palette (washed-out color) and, because palette size jumps in lumps, leaves the
-budget unused. So we iterate: encode, and if we're using well under the budget,
-trim frames a little (which lets a richer palette fit) and re-encode — until the
-budget is actually used. The result is the most frames whose palette fills the
-budget: richer color AND the byte limit put to work. Tunables:
-  USE_FOVEA_GIF (on), FOVEA_AUTOBALANCE (on), FOVEA_COLOR_FLOOR (48),
-  FOVEA_BUDGET_USE (0.90), FOVEA_BUDGET_SECONDS (12), FOVEA_MAX_ATTEMPTS (12),
-  FOVEA_COMPARE (on).
+The budget is split between frames (smoothness) and colors (richness) per a
+``priority`` (reusing the smooth/balanced/sharp control):
+
+  * smooth   — frames first: keep every frame; color is whatever fits.
+  * balanced — most frames whose palette still fills the budget, then top off
+               with frames.
+  * sharp    — color first: trim frames for the richest palette, then add frames
+               back to use the budget.
+
+Either way we never knowingly leave budget on the table: after choosing a palette
+we add frames back at that palette until the byte limit is used. Tunables:
+  USE_FOVEA_GIF (on), FOVEA_AUTOBALANCE (on), FOVEA_BUDGET_USE (0.93),
+  FOVEA_BUDGET_SECONDS (12), FOVEA_MAX_ATTEMPTS (12), FOVEA_COMPARE (on).
 """
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ import tempfile
 
 log = logging.getLogger("fovea.bridge")
 
-MIN_FRAMES = 6  # never trim a clip below this many frames for color
+MIN_FRAMES = 6  # never trim a clip below this many frames
 
 
 def _enabled() -> bool:
@@ -39,97 +43,20 @@ def _autobalance_enabled() -> bool:
     return os.getenv("FOVEA_AUTOBALANCE", "1").lower() not in ("0", "false", "no")
 
 
-def _color_floor() -> int:
-    try:
-        return max(2, int(os.getenv("FOVEA_COLOR_FLOOR", "48")))
-    except ValueError:
-        return 48
+def _color_floor_for(priority: str) -> int:
+    """Target palette richness per mode. 0 = never trim frames (frames-first);
+    higher = trim more frames for a richer palette (color-first)."""
+    if not _autobalance_enabled():
+        return 0
+    return {"smooth": 0, "balanced": 64, "sharp": 160}.get(priority, 64)
 
 
 # --------------------------------------------------------------------------- #
-# Auto-balance: choose how many frames to keep so the palette stays rich.
+# Encoding primitives
 # --------------------------------------------------------------------------- #
-
-def _probe_size_at_colors(fitted, delays, colors: int) -> int | None:
-    """Measure the GIF size of ALL frames at a fixed color count (one encode)."""
-    try:
-        from encoder.core.engines import FfmpegPaletteEngine, prepare_context
-        from encoder.core.frames import frames_from_list
-        from encoder.core.levers import LeverState
-
-        td = tempfile.mkdtemp(prefix="fovea_probe_")
-        try:
-            ctx = prepare_context(frames_from_list(list(fitted), list(delays)), 1.0, td)
-            out = FfmpegPaletteEngine().encode(
-                ctx, LeverState(colors=colors, dither="sierra2_4a"), os.path.join(td, "p.gif"))
-            return out.size_bytes
-        finally:
-            shutil.rmtree(td, ignore_errors=True)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("fovea.probe_failed: %s", str(exc)[:160])
-        return None
-
-
-def _autobalanced_frames(fitted, delays, budget: int):
-    """Return the frames Fovea should encode: all of them if they fit the color
-    floor, else an evenly-spread subset sized so the floor fits the budget."""
-    total = len(fitted)
-    if not _autobalance_enabled() or total <= MIN_FRAMES:
-        return fitted, delays
-    floor = _color_floor()
-    size_at_floor = _probe_size_at_colors(fitted, delays, floor)
-    if size_at_floor is None or size_at_floor <= budget:
-        return fitted, delays  # all frames already hold the color floor
-    # GIF size is ~linear in frame count; size for the budget at the floor.
-    keep = max(MIN_FRAMES, int(total * budget / size_at_floor * 0.90))
-    if keep >= total:
-        return fitted, delays
-    from .encode import even_subsample
-
-    work_f, work_d = even_subsample(list(fitted), list(delays), keep)
-    log.info("fovea.autobalance total=%d keep=%d floor=%d size_at_floor=%d budget=%d",
-             total, len(work_f), floor, size_at_floor, budget)
-    return work_f, work_d
-
-
-def _run_fovea(fitted, delays, budget: int):
-    """Budget-filling Fovea encode -> (bytes, n_frames, output_fps, colors).
-
-    Keeping every frame at a tight size caps the palette (washout) and leaves the
-    budget unused because palette size jumps in lumps. So we iterate: encode, and
-    if we're using well under the budget, trim frames a little (which lets a richer
-    palette fit) and re-encode — until the budget is actually used or we hit the
-    frame floor. The result is the most frames whose palette fills the budget.
-    """
-    from .encode import even_subsample
-
-    total = len(fitted)
-    target_use = float(os.getenv("FOVEA_BUDGET_USE", "0.90"))
-    seconds = float(os.getenv("FOVEA_BUDGET_SECONDS", "12"))
-    attempts = int(os.getenv("FOVEA_MAX_ATTEMPTS", "12"))
-
-    # Start from the auto-balance estimate (leaves room for the color floor).
-    work_f, work_d = _autobalanced_frames(fitted, delays, budget) if _autobalance_enabled() else (fitted, delays)
-    best = None  # (data, n_frames, fps, colors, usage)
-    for i in range(5):
-        data, fps, colors = _encode_once(work_f, work_d, budget, seconds, attempts)
-        usage = (len(data) / budget) if budget else 1.0
-        if best is None or usage > best[4]:
-            best = (data, len(work_f), fps, colors, usage)
-        log.info("fovea.budgetfill iter=%d frames=%d colors=%s bytes=%d usage=%.2f",
-                 i, len(work_f), colors, len(data), usage)
-        if (not _autobalance_enabled() or usage >= target_use
-                or (colors and colors >= 256) or len(work_f) <= MIN_FRAMES):
-            break
-        nf = max(MIN_FRAMES, int(len(work_f) * 0.8))
-        if nf >= len(work_f):
-            break
-        work_f, work_d = even_subsample(list(fitted), list(delays), nf)
-    return best[0], best[1], best[2], best[3]
-
 
 def _encode_once(fitted, delays, budget: int, seconds: float, attempts: int):
-    """One Fovea encode -> (bytes, output_fps, colors)."""
+    """One Fovea encode (max colors that fit) -> (bytes, output_fps, colors)."""
     from encoder import encode as fovea_encode
 
     td = tempfile.mkdtemp(prefix="fovea_run_")
@@ -152,6 +79,90 @@ def _encode_once(fitted, delays, budget: int, seconds: float, attempts: int):
         shutil.rmtree(td, ignore_errors=True)
 
 
+def _encode_fixed_colors(fitted, delays, colors: int):
+    """Encode at a FIXED palette size (so we can add frames while holding color)."""
+    from encoder.core.engines import FfmpegPaletteEngine, prepare_context
+    from encoder.core.frames import frames_from_list
+    from encoder.core.levers import LeverState
+
+    td = tempfile.mkdtemp(prefix="fovea_fix_")
+    try:
+        ctx = prepare_context(frames_from_list(list(fitted), list(delays)), 1.0, td)
+        out = os.path.join(td, "f.gif")
+        eo = FfmpegPaletteEngine().encode(ctx, LeverState(colors=colors, dither="sierra2_4a"), out)
+        with open(out, "rb") as fh:
+            return fh.read(), eo.size_bytes, ctx.fps
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def _fill_frames_at_colors(fitted, delays, budget: int, base_frames: int, base_size: int,
+                           colors: int):
+    """Add frames at a fixed palette to use the budget -> (data, n, fps, usage) or None.
+
+    GIF size is ~linear in frame count at a fixed palette, so estimate the largest
+    frame count that still fits and take the most frames that do.
+    """
+    from .encode import even_subsample
+
+    total = len(fitted)
+    if base_size <= 0:
+        return None
+    est = int(base_frames * budget / base_size)
+    for f2 in sorted({min(total, est + 1), min(total, est), min(total, est - 1),
+                      min(total, est - 2)}, reverse=True):
+        if f2 <= base_frames:
+            continue
+        wf, wd = even_subsample(list(fitted), list(delays), f2)
+        data, size, fps = _encode_fixed_colors(wf, wd, colors)
+        if size <= budget:
+            return data, f2, fps, size / budget
+    return None
+
+
+def _run_fovea(fitted, delays, budget: int, priority: str = "balanced"):
+    """Encode filling the budget per ``priority`` -> (bytes, n_frames, fps, colors)."""
+    from .encode import even_subsample
+
+    total = len(fitted)
+    target = float(os.getenv("FOVEA_BUDGET_USE", "0.93"))
+    seconds = float(os.getenv("FOVEA_BUDGET_SECONDS", "12"))
+    attempts = int(os.getenv("FOVEA_MAX_ATTEMPTS", "12"))
+    floor = _color_floor_for(priority)
+
+    # 1. All frames at the richest palette the budget allows.
+    data, fps, colors = _encode_once(fitted, delays, budget, seconds, attempts)
+    usage = (len(data) / budget) if budget else 1.0
+    chosen = (data, total, fps, colors, usage)
+    log.info("fovea.fill mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
+             priority, total, colors, len(data), usage)
+
+    # 2. Color-seeking trim (balanced/sharp): drop frames until the palette reaches the
+    #    mode's richness floor. Skipped for 'smooth' or when all frames are already rich.
+    if floor and (colors or 0) < floor and (colors or 0) < 256:
+        f = total
+        for _ in range(5):
+            f = max(MIN_FRAMES, int(f * 0.72))
+            wf, wd = even_subsample(list(fitted), list(delays), f)
+            d, fp, c = _encode_once(wf, wd, budget, seconds, attempts)
+            log.info("fovea.fill mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
+                     priority, f, c, len(d), (len(d) / budget) if budget else 1.0)
+            chosen = (d, f, fp, c, (len(d) / budget) if budget else 1.0)
+            if (c or 0) >= floor or (c or 0) >= 256 or f <= MIN_FRAMES:
+                break
+
+    data, n, fps, colors, usage = chosen
+    # 3. Frame-fill: top off the budget by adding frames back at the chosen palette
+    #    (more frames = smoother, no extra washout). Never leave budget on the table.
+    if priority != "smooth" and usage < target and n < total and colors:
+        filled = _fill_frames_at_colors(fitted, delays, budget, n, len(data), int(colors))
+        if filled is not None and filled[3] > usage:
+            data, n, fps, usage = filled
+            log.info("fovea.framefill mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
+                     priority, n, colors, len(data), usage)
+    return data, n, fps, colors
+
+
 def _fovea_note(total: int, kept: int, colors) -> str:
     if kept < total:
         c = f"{colors} colors" if colors else "more color"
@@ -165,11 +176,12 @@ def _fovea_note(total: int, kept: int, colors) -> str:
 # Public entry points
 # --------------------------------------------------------------------------- #
 
-def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, notes=None):
+def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, priority="balanced",
+               notes=None):
     """Return ``(bytes, "GIF", n_frames, fps)`` for the fitted frames under ``budget``."""
     if _enabled():
         try:
-            data, n, fps, colors = _run_fovea(fitted, delays, int(budget))
+            data, n, fps, colors = _run_fovea(fitted, delays, int(budget), priority)
             if notes is not None:
                 notes.append(_fovea_note(len(fitted), n, colors))
             return data, "GIF", n, fps
@@ -197,8 +209,9 @@ def _aligned_distance(metric, fitted, delays, gif_path, n_frames: int) -> float:
     return metric.distance(frames_from_list(sf, sd), load_gif(gif_path)).distance
 
 
-def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24, notes=None):
-    """Encode with BOTH Fovea (auto-balanced) and the legacy encoder for a side-by-side.
+def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24,
+                       priority="balanced", notes=None):
+    """Encode with BOTH Fovea and the legacy encoder for a side-by-side.
 
     Returns ``(fovea_bytes, "GIF", n_frames, fps, comparison, legacy_bytes)``. Each
     side's perceptual distance is measured against the source subsampled to that
@@ -210,7 +223,8 @@ def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24, no
 
     td = tempfile.mkdtemp(prefix="fovea_cmp_")
     try:
-        fovea_data, fovea_n, fovea_fps, fovea_colors = _run_fovea(fitted, delays, int(budget))
+        fovea_data, fovea_n, fovea_fps, fovea_colors = _run_fovea(
+            fitted, delays, int(budget), priority)
         fpath = os.path.join(td, "fovea.gif")
         with open(fpath, "wb") as fh:
             fh.write(fovea_data)

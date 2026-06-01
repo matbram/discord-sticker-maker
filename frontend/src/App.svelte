@@ -139,7 +139,7 @@
     const f = (t) => ({ zoom: framing[t].zoom, offset_x: framing[t].offset_x, offset_y: framing[t].offset_y, fit_mode: framing[t].fit_mode })
     const list = []
     const lim = (t) => ({ max_bytes: limits[t].bytes, max_dim: limits[t].dim })
-    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect, ...lim('gif'), ...f('gif') })
+    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect, priority: params.priority, ...lim('gif'), ...f('gif') })
     if (selected.sticker) list.push({ type: 'sticker', priority: params.priority, ...lim('sticker'), ...f('sticker') })
     if (selected.emoji) list.push({ type: 'emoji', priority: params.priority, ...lim('emoji'), ...f('emoji') })
     return list
@@ -424,6 +424,14 @@
         {/if}
 
         {#if focusedType === 'gif'}
+          <div class="ctl"><span class="ctl-label">Frames vs. color</span>
+            <div class="seg three">
+              <button class:on={params.priority === 'smooth'} on:click={() => setPriority('smooth')}>More frames</button>
+              <button class:on={params.priority === 'balanced'} on:click={() => setPriority('balanced')}>Balanced</button>
+              <button class:on={params.priority === 'sharp'} on:click={() => setPriority('sharp')}>Richer color</button>
+            </div>
+          </div>
+          <p class="muted-line">More frames = smoother, fewer colors. Richer = fuller color, fewer frames. Both fill your size limit.</p>
           <div class="ctl"><span class="ctl-label">GIF shape</span>
             <div class="seg three">
               <button class:on={params.gif_aspect === 'square'} on:click={() => setGifAspect('square')}>Square</button>

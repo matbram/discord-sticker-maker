@@ -131,7 +131,7 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                 elif is_anim and prof["animated_format"] == "GIF":
                     data, fmt, n_frames, fps = fovea_gif.gif_encode(
                         fitted, de, budget=budget, max_colors=eff.max_colors,
-                        fps_cap=prof.get("fps_cap", 30), notes=notes)
+                        fps_cap=prof.get("fps_cap", 30), priority=_v(eff.priority), notes=notes)
                 else:
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None
@@ -146,7 +146,7 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                         (data, fmt, n_frames, fps,
                          comparison, baseline_data) = fovea_gif.gif_encode_compare(
                             fitted, src_de, budget=budget, max_colors=eff.max_colors,
-                            fps_cap=prof.get("fps_cap", 24), notes=notes)
+                            fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority), notes=notes)
                         comparison["baseline_output"] = f"{otype}__cmp"
                         log.info(
                             "audit.gif.compare", type=otype, primary="fovea",
@@ -160,11 +160,11 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                         comparison, baseline_data = None, None
                         data, fmt, n_frames, fps = fovea_gif.gif_encode(
                             fitted, src_de, budget=budget, max_colors=eff.max_colors,
-                            fps_cap=prof.get("fps_cap", 24), notes=notes)
+                            fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority), notes=notes)
                 else:
                     data, fmt, n_frames, fps = fovea_gif.gif_encode(
                         fitted, src_de, budget=budget, max_colors=eff.max_colors,
-                        fps_cap=prof.get("fps_cap", 24), notes=notes)
+                        fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority), notes=notes)
 
         animated = n_frames > 1
         if animated and n_frames < len(fitted):
