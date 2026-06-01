@@ -371,17 +371,20 @@
               <div class="cmp-col win">
                 <div class="cmp-tag">✦ Fovea {#if c.fovea.perceptually_lossless}<span class="cmp-badge">lossless</span>{/if}</div>
                 <img class="cmp-img" src={previewUrl('gif')} alt="Fovea result" />
-                <div class="cmp-stat">{fmtBytes(c.fovea.bytes)} · {c.fovea.frames}f · {matchPct(c.fovea.distance)}% match</div>
+                <div class="cmp-stat">{fmtBytes(c.fovea.bytes)} · {c.fovea.frames}f{c.fovea.colors ? ` · ${c.fovea.colors} colors` : ''} · {matchPct(c.fovea.distance)}% match</div>
+                <div class="cmp-sub">keeps every frame — smoothest motion</div>
                 <button class="cmp-dl" on:click={() => download('gif')}>⬇ Download Fovea</button>
               </div>
               <div class="cmp-col">
                 <div class="cmp-tag">Standard</div>
                 <img class="cmp-img" src={previewUrl(c.baseline_output)} alt="Standard encoder result" />
                 <div class="cmp-stat">{fmtBytes(c.legacy.bytes)} · {c.legacy.frames}f · {matchPct(c.legacy.distance)}% match</div>
+                <div class="cmp-sub">drops frames for more color per frame</div>
                 <button class="cmp-dl ghost" on:click={() => download(c.baseline_output)}>⬇ Download standard</button>
               </div>
             </div>
             <div class="cmp-verdict">{gifVerdict(c)}</div>
+            {#if c.fovea.colors && c.fovea.colors <= 32}<div class="muted-line">Banding? This size only fits {c.fovea.colors} colors across all {c.fovea.frames} frames — raise the max file size or lower the dimensions for richer color.</div>{/if}
           </div>
         {/if}
       </div>
@@ -560,6 +563,7 @@
   .cmp-badge { font-size: 10px; font-weight: 700; color: #fff; background: var(--accent); border-radius: 999px; padding: 1px 7px; }
   .cmp-img { max-width: 100%; max-height: 220px; border-radius: var(--radius-sm); background: var(--bg-elevated); }
   .cmp-stat { font-size: 12px; color: var(--muted); text-align: center; }
+  .cmp-sub { font-size: 11px; color: var(--muted-2); text-align: center; }
   .cmp-verdict { margin-top: 10px; font-size: 13px; font-weight: 600; color: var(--text); background: var(--bg-elevated); border-radius: var(--radius-sm); padding: 8px 10px; }
   .cmp-dl { margin-top: 2px; font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: var(--radius-sm); background: var(--accent); color: #fff; }
   .cmp-dl:hover { background: var(--accent-hover); }

@@ -11,6 +11,7 @@ best result found within the budget.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -64,13 +65,20 @@ def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24, no
     td = tempfile.mkdtemp(prefix="fovea_cmp_")
     try:
         fpath = os.path.join(td, "fovea.gif")
+        rep = os.path.join(td, "fovea.json")
         fres = fovea_encode(
             list(fitted), target_bytes=int(budget), mode="cap", delays_ms=list(delays),
             max_attempts=int(os.getenv("FOVEA_MAX_ATTEMPTS", "16")),
-            budget_seconds=float(os.getenv("FOVEA_BUDGET_SECONDS", "25")), out_path=fpath,
+            budget_seconds=float(os.getenv("FOVEA_BUDGET_SECONDS", "25")),
+            out_path=fpath, report_path=rep,
         )
         with open(fpath, "rb") as fh:
             fovea_data = fh.read()
+        fovea_colors = None
+        try:
+            fovea_colors = json.load(open(rep)).get("lever_setting", {}).get("colors")
+        except Exception:  # noqa: BLE001
+            pass
 
         legacy_data, _, legacy_n, _ = legacy_encode(
             fitted, delays, budget=budget, max_colors=max_colors, fps_cap=fps_cap)
@@ -85,7 +93,7 @@ def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24, no
         lossless = fdist <= metric.invisible_threshold
         comparison = {
             "metric": metric.name,
-            "fovea": {"bytes": len(fovea_data), "frames": len(fitted),
+            "fovea": {"bytes": len(fovea_data), "frames": len(fitted), "colors": fovea_colors,
                       "distance": round(float(fdist), 5), "perceptually_lossless": bool(lossless)},
             "legacy": {"bytes": len(legacy_data), "frames": int(legacy_n),
                        "distance": round(float(ldist), 5)},
