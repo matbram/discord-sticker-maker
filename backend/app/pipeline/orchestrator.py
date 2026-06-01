@@ -13,7 +13,7 @@ from typing import Callable
 from .. import matte_cache
 from ..models import StickerMeta, profile_for, resolve_aspect
 from ..observability import get_logger, stage
-from . import bg_removal, crop_fit, decode, encode, validate
+from . import bg_removal, crop_fit, decode, encode, fovea_gif, validate
 from .ingest import Source
 
 log = get_logger("orchestrator")
@@ -112,8 +112,9 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                 if is_anim and prof["animated_format"] == "APNG":
                     data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
                 elif is_anim and prof["animated_format"] == "GIF":
-                    data, fmt, n_frames, fps = encode.encode_gif(
-                        fitted, de, budget=prof["budget"], max_colors=eff.max_colors, fps_cap=prof.get("fps_cap", 30))
+                    data, fmt, n_frames, fps = fovea_gif.gif_encode(
+                        fitted, de, budget=prof["budget"], max_colors=eff.max_colors,
+                        fps_cap=prof.get("fps_cap", 30), notes=notes)
                 else:
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None
@@ -123,8 +124,9 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                 fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, prof["max_dim"])
                 h, w = fitted[0].shape[:2]
                 src_de = de if is_anim else [100]
-                data, fmt, n_frames, fps = encode.encode_gif(
-                    fitted, src_de, budget=prof["budget"], max_colors=eff.max_colors, fps_cap=prof.get("fps_cap", 24))
+                data, fmt, n_frames, fps = fovea_gif.gif_encode(
+                    fitted, src_de, budget=prof["budget"], max_colors=eff.max_colors,
+                    fps_cap=prof.get("fps_cap", 24), notes=notes)
 
         animated = n_frames > 1
         if animated and n_frames < len(fitted):

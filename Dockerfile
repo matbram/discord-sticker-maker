@@ -29,6 +29,10 @@ COPY backend/requirements.txt ./
 RUN pip install -r requirements.txt
 
 COPY backend/app ./app
+# Fovea encoder package (the backend GIF path imports `encoder`). Its deps
+# (numpy/Pillow/pydantic) are already satisfied by backend/requirements.txt;
+# /app is on sys.path so `import encoder` resolves without a separate install.
+COPY encoder ./encoder
 COPY --from=frontend /fe/dist ./frontend/dist
 
 # Bake the default background-removal model into the image so the first
