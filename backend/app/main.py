@@ -130,10 +130,14 @@ async def process(
         evt = {"type": "progress", "stage": stage, "message": message, "done": done, "total": total, "level": level}
         loop.call_soon_threadsafe(job.queue.put_nowait, evt)
 
+    # Whole-job wall-clock budget (kept under the client's 120s watchdog) so a
+    # pathological clip can't run for minutes; threaded into the Fovea encode loops.
+    deadline = time.monotonic() + float(os.getenv("FOVEA_JOB_SECONDS", "100"))
+
     def run() -> None:
         obs.bind_request(request_id)
         try:
-            outs = orchestrator.process(source, parsed, emit)
+            outs = orchestrator.process(source, parsed, emit, deadline=deadline)
             for otype, data, fmt, meta in outs:
                 job.outputs[otype] = {"bytes": data, "fmt": fmt, "meta": meta.model_dump()}
                 job.order.append(otype)

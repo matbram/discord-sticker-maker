@@ -36,6 +36,13 @@ class Priority(str, Enum):
     sharp = "sharp"
 
 
+class EncodeMode(str, Enum):
+    # cap: hit the byte budget (fill it). invisible: shrink to the smallest
+    # perceptually-lossless size, using the budget only as an upper ceiling.
+    cap = "cap"
+    invisible = "invisible"
+
+
 class OutputType(str, Enum):
     sticker = "sticker"
     emoji = "emoji"
@@ -94,6 +101,9 @@ class OutputSpec(BaseModel):
     """One requested output. Per-output knobs fall back to ProcessParams defaults."""
     type: OutputType = OutputType.sticker
     priority: Optional[Priority] = None
+    # cap (fill the byte budget) or invisible (smallest perceptually-lossless size).
+    # Only the GIF/emoji (Fovea) outputs honor this; the APNG sticker ignores it.
+    mode: EncodeMode = EncodeMode.cap
     max_colors: Optional[int] = Field(None, ge=2, le=256)
     # User-set size limit (bytes) and output dimension (px); fall back to the profile.
     max_bytes: Optional[int] = Field(None, ge=10 * 1024, le=64 * 1024 * 1024)
@@ -151,3 +161,5 @@ class StickerMeta(BaseModel):
     notes: list[str] = Field(default_factory=list)
     # Optional Fovea-vs-legacy side-by-side stats (gif output only); see fovea_gif.
     comparison: Optional[dict] = None
+    # Optional honesty report (stayed lossless? where any loss landed? why it stopped).
+    report: Optional[dict] = None

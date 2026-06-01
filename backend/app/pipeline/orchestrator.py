@@ -74,7 +74,8 @@ def _decode_and_matte(source: Source, params, emit: EmitFn) -> dict:
             "has_alpha": has_alpha, "bg_note": bg_note}
 
 
-def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str, StickerMeta]]:
+def process(source: Source, params, emit: EmitFn,
+            deadline: float | None = None) -> list[tuple[str, bytes, str, StickerMeta]]:
     specs = [(_v(o.type), _v(o.gif_quality), o) for o in (params.outputs or [])]
     profiles = {t: profile_for(t, gq) for t, gq, _ in specs}
 
@@ -118,8 +119,10 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
             fr, de = encode.even_subsample(fr, de, prof["frame_cap"])
         is_anim = animated_src and len(fr) > 1
         notes: list[str] = [bg_note] if bg_note else []
+        mode = _v(spec.mode)
         comparison = None
         baseline_data = None
+        report = None
 
         with stage("output", type=otype, gif_quality=gq):
             emit("encode", f"Making {otype}…")
@@ -129,9 +132,10 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                 if is_anim and prof["animated_format"] == "APNG":
                     data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
                 elif is_anim and prof["animated_format"] == "GIF":
-                    data, fmt, n_frames, fps = fovea_gif.gif_encode(
+                    data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
                         fitted, de, budget=budget, max_colors=eff.max_colors,
-                        fps_cap=prof.get("fps_cap", 30), priority=_v(eff.priority), notes=notes)
+                        fps_cap=prof.get("fps_cap", 30), priority=_v(eff.priority),
+                        mode=mode, deadline=deadline, notes=notes)
                 else:
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None
@@ -141,12 +145,13 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                 fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, out_max_dim)
                 h, w = fitted[0].shape[:2]
                 src_de = de if is_anim else [100]
-                if is_anim and fovea_gif.compare_enabled():
+                if is_anim and mode == "cap" and fovea_gif.compare_enabled():
                     try:
                         (data, fmt, n_frames, fps,
-                         comparison, baseline_data) = fovea_gif.gif_encode_compare(
+                         comparison, baseline_data, report) = fovea_gif.gif_encode_compare(
                             fitted, src_de, budget=budget, max_colors=eff.max_colors,
-                            fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority), notes=notes)
+                            fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
+                            deadline=deadline, notes=notes)
                         comparison["baseline_output"] = f"{otype}__cmp"
                         log.info(
                             "audit.gif.compare", type=otype, primary="fovea",
@@ -156,15 +161,19 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
                             legacy_frames=comparison["legacy"]["frames"],
                             legacy_sha1=_sha1(baseline_data),
                         )
-                    except Exception:  # noqa: BLE001 - comparison is best-effort
+                    except Exception as exc:  # noqa: BLE001 - comparison is best-effort
+                        log.warning("fovea.compare_failed; serving Fovea only: %s", str(exc)[:200])
+                        notes.append("Side-by-side comparison unavailable; showing the Fovea result only.")
                         comparison, baseline_data = None, None
-                        data, fmt, n_frames, fps = fovea_gif.gif_encode(
+                        data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
                             fitted, src_de, budget=budget, max_colors=eff.max_colors,
-                            fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority), notes=notes)
+                            fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
+                            mode=mode, deadline=deadline, notes=notes)
                 else:
-                    data, fmt, n_frames, fps = fovea_gif.gif_encode(
+                    data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
                         fitted, src_de, budget=budget, max_colors=eff.max_colors,
-                        fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority), notes=notes)
+                        fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
+                        mode=mode, deadline=deadline, notes=notes)
 
         animated = n_frames > 1
         if animated and n_frames < len(fitted):
@@ -177,7 +186,7 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
             output_type=otype, width=w, height=h, bytes=len(data), frames=n_frames, fps=fps,
             requested_fps=float(params.max_fps) if animated else None, animated=animated,
             format=fmt, under_limit=len(data) <= hard_limit, checklist=checklist, notes=notes,
-            comparison=comparison,
+            comparison=comparison, report=report,
         )
         log.info("orchestrator.output", **meta.model_dump(exclude={"checklist", "notes", "comparison"}))
         results.append((otype, data, fmt, meta))
