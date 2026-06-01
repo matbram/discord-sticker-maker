@@ -8,6 +8,8 @@ cached cutout instead of recomputing the slow part.
 from __future__ import annotations
 
 import hashlib
+import os
+import time
 from typing import Callable
 
 from .. import matte_cache
@@ -120,6 +122,13 @@ def process(source: Source, params, emit: EmitFn,
         is_anim = animated_src and len(fr) > 1
         notes: list[str] = [bg_note] if bg_note else []
         mode = _v(spec.mode)
+        # Per-output wall-clock cap: one pathological output (e.g. 512px at a tight
+        # budget, where the color-floor trim loop does many high-res re-encodes) must
+        # not blow the whole job or stall the client's SSE connection. The Fovea search
+        # is anytime, so hitting this just returns the best candidate so far.
+        out_deadline = time.monotonic() + float(os.getenv("FOVEA_OUTPUT_SECONDS", "45"))
+        if deadline is not None:
+            out_deadline = min(deadline, out_deadline)
         comparison = None
         baseline_data = None
         report = None
@@ -135,7 +144,7 @@ def process(source: Source, params, emit: EmitFn,
                     data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
                         fitted, de, budget=budget, max_colors=eff.max_colors,
                         fps_cap=prof.get("fps_cap", 30), priority=_v(eff.priority),
-                        mode=mode, deadline=deadline, notes=notes)
+                        mode=mode, deadline=out_deadline, notes=notes)
                 else:
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None
@@ -151,7 +160,7 @@ def process(source: Source, params, emit: EmitFn,
                          comparison, baseline_data, report) = fovea_gif.gif_encode_compare(
                             fitted, src_de, budget=budget, max_colors=eff.max_colors,
                             fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
-                            deadline=deadline, notes=notes)
+                            deadline=out_deadline, notes=notes)
                         comparison["baseline_output"] = f"{otype}__cmp"
                         log.info(
                             "audit.gif.compare", type=otype, primary="fovea",
@@ -168,12 +177,12 @@ def process(source: Source, params, emit: EmitFn,
                         data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
                             fitted, src_de, budget=budget, max_colors=eff.max_colors,
                             fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
-                            mode=mode, deadline=deadline, notes=notes)
+                            mode=mode, deadline=out_deadline, notes=notes)
                 else:
                     data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
                         fitted, src_de, budget=budget, max_colors=eff.max_colors,
                         fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
-                        mode=mode, deadline=deadline, notes=notes)
+                        mode=mode, deadline=out_deadline, notes=notes)
 
         animated = n_frames > 1
         if animated and n_frames < len(fitted):

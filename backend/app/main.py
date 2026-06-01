@@ -185,7 +185,9 @@ async def events(job_id: str):
     async def gen():
         while True:
             try:
-                evt = await asyncio.wait_for(job.queue.get(), timeout=60)
+                # Short keepalive interval so a long, silent encode doesn't look idle
+                # to the platform proxy (which resets idle streams -> client watchdog).
+                evt = await asyncio.wait_for(job.queue.get(), timeout=15)
             except asyncio.TimeoutError:
                 yield ": keepalive\n\n"
                 continue
