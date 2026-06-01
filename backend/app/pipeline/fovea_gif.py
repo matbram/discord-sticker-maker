@@ -154,14 +154,21 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
     per_encode = float(os.getenv("FOVEA_BUDGET_SECONDS", "12"))
     attempts = int(os.getenv("FOVEA_MAX_ATTEMPTS", "12"))
 
-    # Invisible: one encode, smallest lossless under the ceiling; keep every frame.
+    # Invisible: aim for the smallest perceptually-lossless GIF, every frame kept.
+    # If the clip CAN'T be made lossless under the ceiling, fall THROUGH to cap-mode
+    # budget-fill: the encoder never trims frames, so a stuck-low-palette invisible
+    # result is washed out and worse than the default. Falling back guarantees
+    # invisible is never worse than cap (see tests/test_invisible_fallback.py).
     if mode == "invisible":
         data, fps, colors, report = _encode_once(
             fitted, delays, budget, max(1.0, _seconds_left(deadline, per_encode)), attempts,
             mode="invisible")
-        log.info("fovea.invisible frames=%d colors=%s bytes=%d lossless=%s",
-                 total, colors, len(data), report.get("perceptually_lossless"))
-        return data, total, fps, colors, report
+        if report.get("perceptually_lossless"):
+            log.info("fovea.invisible frames=%d colors=%s bytes=%d lossless=True",
+                     total, colors, len(data))
+            return data, total, fps, colors, report
+        log.info("fovea.invisible_fallback frames=%d colors=%s bytes=%d lossless=False; "
+                 "using cap budget-fill", total, colors, len(data))
 
     floor = _color_floor_for(priority)
 
@@ -225,9 +232,16 @@ def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, priority="
                 fitted, delays, int(budget), priority, mode, deadline)
             if notes is not None:
                 notes.append(_fovea_note(len(fitted), n, colors))
-                if mode == "invisible" and report.get("perceptually_lossless"):
-                    notes.append(
-                        f"Shrunk to the smallest perceptually-lossless size ({len(data) // 1024} KB).")
+                if mode == "invisible":
+                    kb = len(data) // 1024
+                    if report.get("mode") == "invisible":          # true smallest-lossless result
+                        notes.append(f"Shrunk to the smallest perceptually-lossless size ({kb} KB).")
+                    elif report.get("perceptually_lossless"):      # fell back, but still lossless
+                        notes.append(f"Couldn't shrink further without visible loss; kept a "
+                                     f"perceptually-lossless {kb} KB fit.")
+                    else:                                          # fell back, not losslessly possible
+                        notes.append("Couldn't reach a no-visible-loss size for this clip; "
+                                     "kept the best-looking fit instead.")
             return data, "GIF", n, fps, report
         except Exception as exc:  # noqa: BLE001 - never let Fovea break the pipeline
             log.warning("fovea.bridge_failed; falling back to legacy: %s", str(exc)[:200])

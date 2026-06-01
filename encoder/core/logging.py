@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 _CONFIGURED = False
 
@@ -18,7 +19,9 @@ def _configure() -> None:
         return
     level_name = os.environ.get("FOVEA_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
-    handler = logging.StreamHandler()
+    # stdout, not the StreamHandler default (stderr): platforms classify stderr as
+    # error level, which would file every INFO encode log as an error.
+    handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     root = logging.getLogger("fovea")
     if not root.handlers:
