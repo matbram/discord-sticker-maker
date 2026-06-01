@@ -26,6 +26,7 @@
   let view = 'idle' // idle | choosing | working | done | error
   let params = defaultParams()
   let source = null
+  let sourceId = null // server-side handle so regenerates skip re-uploading the source
   let urlInput = ''
   let dragging = false
 
@@ -133,6 +134,7 @@
     if (!file) return
     clearSourceUrl()
     source = { file }
+    sourceId = null
     sourceIsVideo = (file.type || '').startsWith('video/')
     sourceUrl = URL.createObjectURL(file)
     params = { ...params, trim_start_s: 0, max_duration_s: 4.0 }
@@ -144,6 +146,7 @@
     const url = urlInput.trim(); if (!url) return
     clearSourceUrl()
     source = { url }
+    sourceId = null
     sourceIsVideo = /\.(mp4|mov|webm|mkv|avi)(\?|$)/i.test(url)
     sourceUrl = url
     params = { ...params, trim_start_s: 0, max_duration_s: 4.0 }
@@ -177,7 +180,8 @@
     error = { message: '', requestId: '' }
     try {
       const payload = { ...params, outputs: buildOutputs() }
-      const { job_id } = await startProcess(source, payload, (p) => { uploadPct = p })
+      const { job_id, source_id } = await startProcess(source, payload, (p) => { uploadPct = p }, sourceId)
+      if (source_id) sourceId = source_id
       jobId = job_id
       closeStream = subscribeEvents(job_id, onEvent)
       armWatchdog()
@@ -270,7 +274,7 @@
 
   function reset() {
     if (closeStream) closeStream(); disarmWatchdog(); clearSourceUrl()
-    busy = false; view = 'idle'; source = null; urlInput = ''; sourceUrl = ''; sourceW = 0; sourceH = 0
+    busy = false; view = 'idle'; source = null; sourceId = null; urlInput = ''; sourceUrl = ''; sourceW = 0; sourceH = 0
     outputs = []; jobId = null; doneJob = null
   }
 

@@ -1,12 +1,15 @@
 import { logger, setRequestId } from './logger.js'
 
 // Kick off processing. `source` is { file } or { url }. `onUpload(fraction)` reports
-// upload progress (0..1). Returns { job_id, request_id }.
-export function startProcess(source, params, onUpload) {
-  return new Promise((resolve, reject) => {
+// upload progress (0..1). `sourceId` (optional) references a previously-uploaded
+// source so regens don't re-upload it; if the server says it expired we transparently
+// resend the full source. Returns { job_id, request_id, source_id }.
+export function startProcess(source, params, onUpload, sourceId = null) {
+  const send = (useId) => new Promise((resolve, reject) => {
     const form = new FormData()
     form.append('params', JSON.stringify(params))
-    if (source.file) form.append('file', source.file)
+    if (useId && sourceId) form.append('source_id', sourceId)
+    else if (source.file) form.append('file', source.file)
     else if (source.url) form.append('url', source.url)
 
     const xhr = new XMLHttpRequest()
@@ -25,12 +28,21 @@ export function startProcess(source, params, onUpload) {
       } else {
         const err = new Error(data.error || 'Failed to start processing')
         err.requestId = data.request_id
+        err.sourceExpired = !!data.source_expired
         reject(err)
       }
     }
     xhr.onerror = () => reject(new Error('Network error during upload'))
     xhr.send(form)
   })
+
+  if (sourceId) {
+    return send(true).catch((e) => {
+      if (e.sourceExpired && (source.file || source.url)) return send(false)
+      throw e
+    })
+  }
+  return send(false)
 }
 
 // Subscribe to SSE progress. Calls onEvent(evt) for each event. Returns a close fn.

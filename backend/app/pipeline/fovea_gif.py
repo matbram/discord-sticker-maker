@@ -20,12 +20,15 @@ we add frames back at that palette until the byte limit is used. Tunables:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import shutil
 import tempfile
+import threading
 import time
+from collections import OrderedDict
 
 log = logging.getLogger("fovea.bridge")
 
@@ -50,6 +53,46 @@ def _color_floor_for(priority: str) -> int:
     if not _autobalance_enabled():
         return 0
     return {"smooth": 0, "balanced": 64, "sharp": 160}.get(priority, 64)
+
+
+# --------------------------------------------------------------------------- #
+# Legacy-baseline cache: the side-by-side's standard-encoder result depends only on
+# the fitted frames + size/colors/fps — NOT on Fovea's priority/mode. Cache it so
+# tweaking priority doesn't re-run the standard encoder on every regenerate.
+# --------------------------------------------------------------------------- #
+_LEGACY_TTL = 900.0
+_LEGACY_MAX = 8
+_legacy_lock = threading.Lock()
+_legacy_cache: "OrderedDict[str, tuple]" = OrderedDict()  # sig -> (data, n_frames, ts)
+
+
+def _legacy_sig(fitted, delays, budget: int, max_colors: int, fps_cap) -> str:
+    """Cheap content signature of the legacy inputs (samples ~4 frames)."""
+    h = hashlib.sha1()
+    n = len(fitted)
+    h.update(f"{n}|{fitted[0].shape}|{list(delays)}|{budget}|{max_colors}|{fps_cap}".encode())
+    for i in range(0, n, max(1, n // 4)):
+        h.update(fitted[i].tobytes())
+    return h.hexdigest()
+
+
+def _legacy_get(sig: str):
+    with _legacy_lock:
+        e = _legacy_cache.get(sig)
+        if e is not None and (time.time() - e[2]) <= _LEGACY_TTL:
+            _legacy_cache.move_to_end(sig)
+            return e[0], e[1]
+        if e is not None:
+            _legacy_cache.pop(sig, None)
+    return None
+
+
+def _legacy_put(sig: str, data: bytes, n_frames: int) -> None:
+    with _legacy_lock:
+        _legacy_cache[sig] = (data, n_frames, time.time())
+        _legacy_cache.move_to_end(sig)
+        while len(_legacy_cache) > _LEGACY_MAX:
+            _legacy_cache.popitem(last=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -288,8 +331,14 @@ def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24,
         with open(fpath, "wb") as fh:
             fh.write(fovea_data)
 
-        legacy_data, _, legacy_n, _ = legacy_encode(
-            fitted, delays, budget=budget, max_colors=max_colors, fps_cap=fps_cap)
+        sig = _legacy_sig(fitted, delays, budget, max_colors, fps_cap)
+        cached = _legacy_get(sig)
+        if cached is not None:
+            legacy_data, legacy_n = cached
+        else:
+            legacy_data, _, legacy_n, _ = legacy_encode(
+                fitted, delays, budget=budget, max_colors=max_colors, fps_cap=fps_cap)
+            _legacy_put(sig, legacy_data, legacy_n)
         lpath = os.path.join(td, "legacy.gif")
         with open(lpath, "wb") as fh:
             fh.write(legacy_data)
