@@ -47,11 +47,12 @@ class LeverState:
 
 
 # Primary ladders — index up => bigger file.
-# A fairly fine COLORS ladder so the size search can land close to the byte target
-# (using the budget for more colors = less banding) rather than stopping well under
-# it because the next coarse step overshot.
+# A fine COLORS ladder, dense in the low/mid range where banding is most sensitive,
+# so the size search climbs into the available budget (more colors = less washout)
+# instead of stalling on a coarse rung well under the target.
 FFMPEG_COLORS: tuple[int, ...] = (
-    8, 12, 16, 20, 24, 32, 40, 48, 64, 80, 96, 128, 160, 192, 224, 256
+    8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 36, 40, 44, 48, 56,
+    64, 72, 80, 96, 112, 128, 160, 192, 224, 256
 )
 GIFSKI_QUALITY: tuple[int, ...] = (30, 40, 50, 60, 70, 80, 90, 100)
 GIFSICLE_LOSSY: tuple[int, ...] = (200, 160, 120, 90, 60, 40, 20, 0)  # high lossy = small file
