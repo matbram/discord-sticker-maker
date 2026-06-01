@@ -45,6 +45,22 @@
   }
   let framing = defaultFraming()
 
+  // Per-output size limit (the byte target Fovea encodes to) and output dimension.
+  const SIZE_PRESETS = [
+    { label: '256 KB', v: 262144 }, { label: '512 KB', v: 524288 },
+    { label: '1 MB', v: 1048576 }, { label: '2 MB', v: 2097152 },
+    { label: '5 MB', v: 5242880 }, { label: '8 MB', v: 8388608 }
+  ]
+  const DIM_PRESETS = [128, 256, 320, 360, 480, 512]
+  function defaultLimits() {
+    return {
+      gif: { bytes: 5242880, dim: 360 },
+      sticker: { bytes: 524288, dim: 320 },
+      emoji: { bytes: 262144, dim: 128 }
+    }
+  }
+  let limits = defaultLimits()
+
   let jobId = null
   let doneJob = null // job whose results are actually ready (drives preview URLs)
   let uploadPct = 0
@@ -119,9 +135,10 @@
   function buildOutputs() {
     const f = (t) => ({ zoom: framing[t].zoom, offset_x: framing[t].offset_x, offset_y: framing[t].offset_y, fit_mode: framing[t].fit_mode })
     const list = []
-    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect, ...f('gif') })
-    if (selected.sticker) list.push({ type: 'sticker', priority: params.priority, ...f('sticker') })
-    if (selected.emoji) list.push({ type: 'emoji', priority: params.priority, ...f('emoji') })
+    const lim = (t) => ({ max_bytes: limits[t].bytes, max_dim: limits[t].dim })
+    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect, ...lim('gif'), ...f('gif') })
+    if (selected.sticker) list.push({ type: 'sticker', priority: params.priority, ...lim('sticker'), ...f('sticker') })
+    if (selected.emoji) list.push({ type: 'emoji', priority: params.priority, ...lim('emoji'), ...f('emoji') })
     return list
   }
   $: anySelected = selected.sticker || selected.emoji || selected.gif
@@ -198,6 +215,15 @@
   function setPriority(p) { params = { ...params, priority: p }; scheduleRegen() }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
+  function setLimitBytes(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], bytes: v } }; scheduleRegen() }
+  function setLimitDim(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], dim: v } }; scheduleRegen() }
+  function matchPct(d) { return Math.max(0, Math.min(100, (1 - (d || 0)) * 100)).toFixed(1) }
+  function gifVerdict(c) {
+    if (c.fovea.frames > c.legacy.frames) return `Keeps all ${c.fovea.frames} frames — the standard encoder dropped to ${c.legacy.frames} to fit.`
+    if (c.fovea.distance < c.legacy.distance - 1e-4) return 'Closer match to the source at the same size.'
+    if (c.fovea.bytes < c.legacy.bytes * 0.97) return 'Smaller file at equal quality.'
+    return 'Comparable to the standard encoder on this clip.'
+  }
   function toggleBg() { params = { ...params, remove_bg: !params.remove_bg }; scheduleRegen() }
   function onTrimChange(e) { params = { ...params, trim_start_s: e.detail.start, max_duration_s: e.detail.length }; scheduleRegen() }
   function focusOutput(e) { focusedType = e.detail.type }
@@ -218,6 +244,7 @@
 
   function previewUrl(type) { return doneJob ? `/api/result/${doneJob}/${type}?v=${doneJob}` : '' }
   function getOut(type) { return outputs.find((o) => o.type === type) }
+  $: userOutputs = outputs.filter((o) => !String(o.type).includes('__cmp'))
 
   $: fr = framing[focusedType] || framing.gif
   $: focusAspect = focusedType === 'gif' ? resolveAspect(params.gif_aspect, sourceW, sourceH) : [1, 1]
@@ -322,6 +349,26 @@
                        src={sourceUrl} isVideo={sourceIsVideo} naturalW={sourceW} naturalH={sourceH}
                        {outputs} jobId={doneJob} {previewBg} {busy} on:focus={focusOutput} />
         </div>
+
+        {#if focusedType === 'gif' && focusOut?.meta?.comparison}
+          {@const c = focusOut.meta.comparison}
+          <div class="strip-card">
+            <div class="strip-head"><span>Fovea vs. standard encoder</span><span class="muted-line">same size target · {c.metric}</span></div>
+            <div class="cmp-grid">
+              <div class="cmp-col win">
+                <div class="cmp-tag">✦ Fovea {#if c.fovea.perceptually_lossless}<span class="cmp-badge">lossless</span>{/if}</div>
+                <img class="cmp-img" src={previewUrl('gif')} alt="Fovea result" />
+                <div class="cmp-stat">{fmtBytes(c.fovea.bytes)} · {c.fovea.frames}f · {matchPct(c.fovea.distance)}% match</div>
+              </div>
+              <div class="cmp-col">
+                <div class="cmp-tag">Standard</div>
+                <img class="cmp-img" src={previewUrl(c.baseline_output)} alt="Standard encoder result" />
+                <div class="cmp-stat">{fmtBytes(c.legacy.bytes)} · {c.legacy.frames}f · {matchPct(c.legacy.distance)}% match</div>
+              </div>
+            </div>
+            <div class="cmp-verdict">{gifVerdict(c)}</div>
+          </div>
+        {/if}
       </div>
 
       <!-- sidebar: shared edits + focused controls + downloads -->
@@ -341,12 +388,20 @@
         <p class="muted-line">Snap shows center guides; hold ⇧ while dragging to lock to one axis.</p>
         <label class="toggle"><span>Cut out background</span><input type="checkbox" checked={params.remove_bg} on:change={toggleBg} /></label>
 
-        {#if focusedType === 'gif'}
-          <div class="ctl"><span class="ctl-label">GIF size</span>
-            <div class="seg three">
-              {#each ['small','balanced','high'] as q}<button class:on={params.gif_quality === q} on:click={() => setGifQuality(q)}>{q[0].toUpperCase() + q.slice(1)}</button>{/each}
+        {#if focusOut}
+          <div class="ctl"><span class="ctl-label">Max file size · {focusMeta.label}</span>
+            <div class="chips">
+              {#each SIZE_PRESETS as p}<button class="chip" class:on={limits[focusedType]?.bytes === p.v} on:click={() => setLimitBytes(p.v)}>{p.label}</button>{/each}
             </div>
           </div>
+          <div class="ctl"><span class="ctl-label">Dimensions</span>
+            <div class="chips">
+              {#each DIM_PRESETS as d}<button class="chip" class:on={limits[focusedType]?.dim === d} on:click={() => setLimitDim(d)}>{d}px</button>{/each}
+            </div>
+          </div>
+        {/if}
+
+        {#if focusedType === 'gif'}
           <div class="ctl"><span class="ctl-label">GIF shape</span>
             <div class="seg three">
               <button class:on={params.gif_aspect === 'square'} on:click={() => setGifAspect('square')}>Square</button>
@@ -388,7 +443,7 @@
         {/if}
 
         <button class="primary-btn big" on:click={() => download(focusedType)} disabled={busy || !focusOut}>⬇ Download {focusMeta.label}</button>
-        {#if outputs.length > 1}<button class="ghost-btn full" on:click={downloadAll} disabled={busy}>⬇ Download all ({outputs.length})</button>{/if}
+        {#if userOutputs.length > 1}<button class="ghost-btn full" on:click={downloadAll} disabled={busy}>⬇ Download all ({userOutputs.length})</button>{/if}
 
         <details class="howto-mini"><summary>How to add {focusMeta.label} to Discord</summary>
           <ol>{#each guidance[focusedType] as step}<li>{step}</li>{/each}</ol></details>
@@ -473,6 +528,20 @@
   .seg button { flex: 1; padding: 6px 8px; border-radius: var(--radius-sm); color: var(--muted); font-weight: 600; font-size: 12px; }
   .seg button.on { background: var(--accent); color: #fff; }
   .ghost-btn.full { width: 100%; text-align: center; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { padding: 6px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg-elevated); color: var(--muted); font-size: 12px; font-weight: 600; }
+  .chip:hover { border-color: var(--accent); color: var(--text); }
+  .chip.on { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+  .cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .cmp-col { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  .cmp-col.win { border-color: var(--accent); background: var(--accent-soft); }
+  .cmp-tag { font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 6px; }
+  .cmp-badge { font-size: 10px; font-weight: 700; color: #fff; background: var(--accent); border-radius: 999px; padding: 1px 7px; }
+  .cmp-img { max-width: 100%; max-height: 220px; border-radius: var(--radius-sm); background: var(--bg-elevated); }
+  .cmp-stat { font-size: 12px; color: var(--muted); text-align: center; }
+  .cmp-verdict { margin-top: 10px; font-size: 13px; font-weight: 600; color: var(--text); background: var(--bg-elevated); border-radius: var(--radius-sm); padding: 8px 10px; }
 
   .working-strip { width: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius); padding: 10px 14px; }
   .dot-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent); animation: spin 0.8s linear infinite; flex: none; }

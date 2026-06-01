@@ -42,6 +42,62 @@ def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, notes=None
     return legacy(fitted, delays, budget=budget, max_colors=max_colors, fps_cap=fps_cap)
 
 
+def compare_enabled() -> bool:
+    """Whether to also run the legacy encoder for a side-by-side comparison."""
+    return os.getenv("FOVEA_COMPARE", "1").lower() not in ("0", "false", "no")
+
+
+def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24, notes=None):
+    """Encode the GIF with BOTH Fovea and the legacy encoder for a side-by-side.
+
+    Returns ``(fovea_bytes, "GIF", n_frames, fps, comparison, legacy_bytes)`` where
+    ``comparison`` carries each variant's size, frame count, and a perceptual
+    distance (same judge, same source) so the UI can show which is closer + smaller.
+    Both distances come from the encoder's reference metric.
+    """
+    from encoder import encode as fovea_encode
+    from encoder.core.frames import frames_from_list, load_gif
+    from encoder.metrics import default_metric
+
+    from .encode import encode_gif as legacy_encode
+
+    td = tempfile.mkdtemp(prefix="fovea_cmp_")
+    try:
+        fpath = os.path.join(td, "fovea.gif")
+        fres = fovea_encode(
+            list(fitted), target_bytes=int(budget), mode="cap", delays_ms=list(delays),
+            max_attempts=int(os.getenv("FOVEA_MAX_ATTEMPTS", "16")),
+            budget_seconds=float(os.getenv("FOVEA_BUDGET_SECONDS", "25")), out_path=fpath,
+        )
+        with open(fpath, "rb") as fh:
+            fovea_data = fh.read()
+
+        legacy_data, _, legacy_n, _ = legacy_encode(
+            fitted, delays, budget=budget, max_colors=max_colors, fps_cap=fps_cap)
+        lpath = os.path.join(td, "legacy.gif")
+        with open(lpath, "wb") as fh:
+            fh.write(legacy_data)
+
+        metric = default_metric()
+        src = frames_from_list(list(fitted), list(delays))
+        fdist = metric.distance(src, load_gif(fpath)).distance
+        ldist = metric.distance(src, load_gif(lpath)).distance
+        lossless = fdist <= metric.invisible_threshold
+        comparison = {
+            "metric": metric.name,
+            "fovea": {"bytes": len(fovea_data), "frames": len(fitted),
+                      "distance": round(float(fdist), 5), "perceptually_lossless": bool(lossless)},
+            "legacy": {"bytes": len(legacy_data), "frames": int(legacy_n),
+                       "distance": round(float(ldist), 5)},
+        }
+        if notes is not None:
+            notes.append("Fovea: visually identical to the source at this size."
+                         if lossless else "Fovea: slight visible softening to fit the size limit.")
+        return fovea_data, "GIF", len(fitted), fres.output_fps, comparison, legacy_data
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
 def _fovea_encode(fitted, delays, budget, notes):
     from encoder import encode as fovea_encode
 

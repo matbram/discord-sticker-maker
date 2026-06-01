@@ -95,6 +95,9 @@ class OutputSpec(BaseModel):
     type: OutputType = OutputType.sticker
     priority: Optional[Priority] = None
     max_colors: Optional[int] = Field(None, ge=2, le=256)
+    # User-set size limit (bytes) and output dimension (px); fall back to the profile.
+    max_bytes: Optional[int] = Field(None, ge=10 * 1024, le=64 * 1024 * 1024)
+    max_dim: Optional[int] = Field(None, ge=16, le=1024)
     gif_quality: GifQuality = GifQuality.balanced
     aspect: GifAspect = GifAspect.source  # GIF-only; sticker/emoji ignore it (always square)
     # Per-output framing — falls back to the shared ProcessParams values when unset,
@@ -146,3 +149,5 @@ class StickerMeta(BaseModel):
     under_limit: bool
     checklist: dict
     notes: list[str] = Field(default_factory=list)
+    # Optional Fovea-vs-legacy side-by-side stats (gif output only); see fovea_gif.
+    comparison: Optional[dict] = None

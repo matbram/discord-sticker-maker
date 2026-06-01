@@ -88,11 +88,19 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
     animated_src, has_alpha, bg_note = shared["animated"], shared["has_alpha"], shared["bg_note"]
 
     results: list[tuple[str, bytes, str, StickerMeta]] = []
+    extras: list[tuple[str, bytes, str, StickerMeta]] = []  # comparison baselines (served, not shown)
+    completed = 0
     for otype, gq, spec in specs:
         prof = profiles[otype]
+        # Effective size limit + dimensions: per-output overrides from the UI, else profile.
+        budget = spec.max_bytes or prof["budget"]
+        hard_limit = spec.max_bytes or prof["hard_limit"]
+        out_size = spec.max_dim or prof.get("size")            # square side (sticker/emoji)
+        out_max_dim = spec.max_dim or prof.get("max_dim")      # gif longest edge
         eff = params.model_copy(update={
             "priority": spec.priority or params.priority,
             "max_colors": spec.max_colors or params.max_colors,
+            "max_bytes": budget,
             "zoom": spec.zoom if spec.zoom is not None else params.zoom,
             "offset_x": spec.offset_x if spec.offset_x is not None else params.offset_x,
             "offset_y": spec.offset_y if spec.offset_y is not None else params.offset_y,
@@ -103,17 +111,19 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
             fr, de = encode.even_subsample(fr, de, prof["frame_cap"])
         is_anim = animated_src and len(fr) > 1
         notes: list[str] = [bg_note] if bg_note else []
+        comparison = None
+        baseline_data = None
 
         with stage("output", type=otype, gif_quality=gq):
             emit("encode", f"Making {otype}…")
             if prof["square"]:
-                fitted = crop_fit.fit_square(fr, eff, has_alpha, prof["size"])
-                w = h = prof["size"]
+                fitted = crop_fit.fit_square(fr, eff, has_alpha, out_size)
+                w = h = out_size
                 if is_anim and prof["animated_format"] == "APNG":
                     data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
                 elif is_anim and prof["animated_format"] == "GIF":
                     data, fmt, n_frames, fps = fovea_gif.gif_encode(
-                        fitted, de, budget=prof["budget"], max_colors=eff.max_colors,
+                        fitted, de, budget=budget, max_colors=eff.max_colors,
                         fps_cap=prof.get("fps_cap", 30), notes=notes)
                 else:
                     data, fmt = encode.encode_static(fitted[0], eff)
@@ -121,12 +131,25 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
             else:
                 sh, sw = fr[0].shape[:2]
                 aw, ah = resolve_aspect(spec.aspect, sw, sh)
-                fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, prof["max_dim"])
+                fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, out_max_dim)
                 h, w = fitted[0].shape[:2]
                 src_de = de if is_anim else [100]
-                data, fmt, n_frames, fps = fovea_gif.gif_encode(
-                    fitted, src_de, budget=prof["budget"], max_colors=eff.max_colors,
-                    fps_cap=prof.get("fps_cap", 24), notes=notes)
+                if is_anim and fovea_gif.compare_enabled():
+                    try:
+                        (data, fmt, n_frames, fps,
+                         comparison, baseline_data) = fovea_gif.gif_encode_compare(
+                            fitted, src_de, budget=budget, max_colors=eff.max_colors,
+                            fps_cap=prof.get("fps_cap", 24), notes=notes)
+                        comparison["baseline_output"] = f"{otype}__cmp"
+                    except Exception:  # noqa: BLE001 - comparison is best-effort
+                        comparison, baseline_data = None, None
+                        data, fmt, n_frames, fps = fovea_gif.gif_encode(
+                            fitted, src_de, budget=budget, max_colors=eff.max_colors,
+                            fps_cap=prof.get("fps_cap", 24), notes=notes)
+                else:
+                    data, fmt, n_frames, fps = fovea_gif.gif_encode(
+                        fitted, src_de, budget=budget, max_colors=eff.max_colors,
+                        fps_cap=prof.get("fps_cap", 24), notes=notes)
 
         animated = n_frames > 1
         if animated and n_frames < len(fitted):
@@ -138,11 +161,20 @@ def process(source: Source, params, emit: EmitFn) -> list[tuple[str, bytes, str,
         meta = StickerMeta(
             output_type=otype, width=w, height=h, bytes=len(data), frames=n_frames, fps=fps,
             requested_fps=float(params.max_fps) if animated else None, animated=animated,
-            format=fmt, under_limit=len(data) <= prof["hard_limit"], checklist=checklist, notes=notes,
+            format=fmt, under_limit=len(data) <= hard_limit, checklist=checklist, notes=notes,
+            comparison=comparison,
         )
-        log.info("orchestrator.output", **meta.model_dump(exclude={"checklist", "notes"}))
+        log.info("orchestrator.output", **meta.model_dump(exclude={"checklist", "notes", "comparison"}))
         results.append((otype, data, fmt, meta))
-        emit("output_done", f"{otype} ready", done=len(results), total=len(specs))
+        if baseline_data is not None and comparison is not None:
+            bframes = comparison["legacy"]["frames"]
+            extras.append((f"{otype}__cmp", baseline_data, "GIF", StickerMeta(
+                output_type=f"{otype}__cmp", width=w, height=h, bytes=len(baseline_data),
+                frames=bframes, fps=None, animated=bframes > 1, format="GIF",
+                under_limit=len(baseline_data) <= hard_limit, checklist={}, notes=[])))
+        completed += 1
+        emit("output_done", f"{otype} ready", done=completed, total=len(specs))
 
+    results.extend(extras)
     emit("done", "All set", done=1, total=1)
     return results

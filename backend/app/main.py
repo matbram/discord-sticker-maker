@@ -187,6 +187,8 @@ async def result_typed(job_id: str, output: str, download: bool = False):
         buf = _io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             for t in job.order:
+                if "__cmp" in t:  # comparison baseline is served on demand, not bundled
+                    continue
                 o = job.outputs[t]
                 ext = "gif" if o["fmt"] == "GIF" else "png"
                 z.writestr(f"discord-{t}.{ext}", o["bytes"])
