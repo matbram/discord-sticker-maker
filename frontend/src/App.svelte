@@ -78,10 +78,13 @@
   let fileInput
 
   const PARAMS_KEY = 'dsm_params_v3'
+  const LIMITS_KEY = 'dsm_limits_v1'
   onMount(() => {
     try { const s = JSON.parse(localStorage.getItem(PARAMS_KEY) || 'null'); if (s) params = { ...defaultParams(), ...s } } catch (_) {}
+    try { const l = JSON.parse(localStorage.getItem(LIMITS_KEY) || 'null'); if (l) limits = { ...defaultLimits(), ...l } } catch (_) {}
   })
   function persistParams() { try { localStorage.setItem(PARAMS_KEY, JSON.stringify(params)) } catch (_) {} }
+  function persistLimits() { try { localStorage.setItem(LIMITS_KEY, JSON.stringify(limits)) } catch (_) {} }
   function fmtBytes(n) { return n == null ? '—' : (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`) }
 
   function armWatchdog() {
@@ -215,8 +218,18 @@
   function setPriority(p) { params = { ...params, priority: p }; scheduleRegen() }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
-  function setLimitBytes(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], bytes: v } }; scheduleRegen() }
-  function setLimitDim(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], dim: v } }; scheduleRegen() }
+  function setLimitBytes(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], bytes: v } }; persistLimits(); scheduleRegen() }
+  function setLimitDim(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], dim: v } }; persistLimits(); scheduleRegen() }
+  // Parse a freeform size like "800KB" / "3.5MB" (binary units, matching the encoder).
+  function parseSize(str) {
+    const m = String(str).trim().match(/^([0-9]*\.?[0-9]+)\s*(b|kb|kib|mb|mib|g|gb|gib)?$/i)
+    if (!m) return null
+    const mult = { b: 1, kb: 1024, kib: 1024, mb: 1048576, mib: 1048576, g: 1073741824, gb: 1073741824, gib: 1073741824 }[(m[2] || 'b').toLowerCase()]
+    const v = Math.round(parseFloat(m[1]) * mult)
+    return v >= 1024 ? Math.min(v, 64 * 1048576) : null
+  }
+  function setCustomBytes(e) { const v = parseSize(e.target.value); if (v) setLimitBytes(v); else e.target.value = '' }
+  function setCustomDim(e) { const v = Math.round(parseFloat(e.target.value) || 0); if (v >= 16 && v <= 1024) setLimitDim(v) }
   function matchPct(d) { return Math.max(0, Math.min(100, (1 - (d || 0)) * 100)).toFixed(1) }
   function gifVerdict(c) {
     if (c.fovea.frames > c.legacy.frames) return `Keeps all ${c.fovea.frames} frames — the standard encoder dropped to ${c.legacy.frames} to fit.`
@@ -359,11 +372,13 @@
                 <div class="cmp-tag">✦ Fovea {#if c.fovea.perceptually_lossless}<span class="cmp-badge">lossless</span>{/if}</div>
                 <img class="cmp-img" src={previewUrl('gif')} alt="Fovea result" />
                 <div class="cmp-stat">{fmtBytes(c.fovea.bytes)} · {c.fovea.frames}f · {matchPct(c.fovea.distance)}% match</div>
+                <button class="cmp-dl" on:click={() => download('gif')}>⬇ Download Fovea</button>
               </div>
               <div class="cmp-col">
                 <div class="cmp-tag">Standard</div>
                 <img class="cmp-img" src={previewUrl(c.baseline_output)} alt="Standard encoder result" />
                 <div class="cmp-stat">{fmtBytes(c.legacy.bytes)} · {c.legacy.frames}f · {matchPct(c.legacy.distance)}% match</div>
+                <button class="cmp-dl ghost" on:click={() => download(c.baseline_output)}>⬇ Download standard</button>
               </div>
             </div>
             <div class="cmp-verdict">{gifVerdict(c)}</div>
@@ -393,11 +408,15 @@
             <div class="chips">
               {#each SIZE_PRESETS as p}<button class="chip" class:on={limits[focusedType]?.bytes === p.v} on:click={() => setLimitBytes(p.v)}>{p.label}</button>{/each}
             </div>
+            <input class="custom-in" type="text" placeholder="custom — e.g. 800KB, 3.5MB" on:change={setCustomBytes} on:keydown={(e) => e.key === 'Enter' && setCustomBytes(e)} />
+            <span class="muted-line">Target: {fmtBytes(limits[focusedType]?.bytes)}</span>
           </div>
           <div class="ctl"><span class="ctl-label">Dimensions</span>
             <div class="chips">
               {#each DIM_PRESETS as d}<button class="chip" class:on={limits[focusedType]?.dim === d} on:click={() => setLimitDim(d)}>{d}px</button>{/each}
             </div>
+            <input class="custom-in" type="number" min="16" max="1024" placeholder="custom px" on:change={setCustomDim} />
+            <span class="muted-line">Size: {limits[focusedType]?.dim}px</span>
           </div>
         {/if}
 
@@ -439,10 +458,10 @@
           <ul class="checks">
             {#each Object.entries(focusOut.meta.checklist) as [label, ok]}<li class:ok>{ok ? '✓' : '✕'} {label}</li>{/each}
           </ul>
-          {#if focusOut.meta.notes?.length}<div class="onote">{focusOut.meta.notes[0]}</div>{/if}
+          {#each focusOut.meta.notes || [] as note}<div class="onote">{note}</div>{/each}
         {/if}
 
-        <button class="primary-btn big" on:click={() => download(focusedType)} disabled={busy || !focusOut}>⬇ Download {focusMeta.label}</button>
+        <button class="primary-btn big" on:click={() => download(focusedType)} disabled={busy || !focusOut}>⬇ Download {focusMeta.label}{focusedType === 'gif' && focusOut?.meta?.comparison ? ' (Fovea)' : ''}</button>
         {#if userOutputs.length > 1}<button class="ghost-btn full" on:click={downloadAll} disabled={busy}>⬇ Download all ({userOutputs.length})</button>{/if}
 
         <details class="howto-mini"><summary>How to add {focusMeta.label} to Discord</summary>
@@ -542,6 +561,12 @@
   .cmp-img { max-width: 100%; max-height: 220px; border-radius: var(--radius-sm); background: var(--bg-elevated); }
   .cmp-stat { font-size: 12px; color: var(--muted); text-align: center; }
   .cmp-verdict { margin-top: 10px; font-size: 13px; font-weight: 600; color: var(--text); background: var(--bg-elevated); border-radius: var(--radius-sm); padding: 8px 10px; }
+  .cmp-dl { margin-top: 2px; font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: var(--radius-sm); background: var(--accent); color: #fff; }
+  .cmp-dl:hover { background: var(--accent-hover); }
+  .cmp-dl.ghost { background: var(--bg-elevated); color: var(--muted); border: 1px solid var(--border); }
+  .cmp-dl.ghost:hover { color: var(--text); border-color: var(--accent); }
+  .custom-in { margin-top: 6px; width: 100%; background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text); padding: 7px 10px; border-radius: var(--radius-sm); font-size: 12px; outline: none; }
+  .custom-in:focus { border-color: var(--accent); box-shadow: var(--ring); }
 
   .working-strip { width: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius); padding: 10px 14px; }
   .dot-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent); animation: spin 0.8s linear infinite; flex: none; }
