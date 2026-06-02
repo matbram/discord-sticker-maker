@@ -5,14 +5,19 @@ clip can't fit 512KB *losslessly*. Instead of crushing every frame into one shar
 (the old "sepia" washout), we keep **truecolor (no palette → no washout) and every frame**,
 and manufacture the needed compression *perceptually* in the native core (`fovea_native`):
 
+  * temporal stabilization (the dominant lever) — real clips have huge frame-to-frame
+    redundancy a per-frame palette throws away. Static pixels collapse to a temporal constant
+    (drawn once, reused forever), grain is averaged out, and the alpha matte is frozen so its
+    per-frame shimmer (the "shader" edge artifact) stops churning. This is what a video codec
+    exploits; APNG's inter-frame delta + an OVER blend that carries only changed pixels turns
+    that redundancy into bytes saved.
   * OKLab inter-frame delta — redraw only the pixels the eye sees change.
-  * edge-aware denoise — remove incompressible grain the eye doesn't track (the big lever).
-  * chroma reduction — coarsen chroma, which the eye tolerates far more than luma.
+  * spatial denoise / chroma reduction — a last-resort tail for pathological full-frame motion.
 
 A metric-guided search raises a single ``strength`` only as far as needed to fit the byte
-budget, so clean clips stay pristine and only hard ones are (imperceptibly) smoothed. Frames
+budget, so clean clips stay pristine and only hard ones are (imperceptibly) stabilized. Frames
 and color are never dropped. Falls back to the legacy ``encode_animated`` if the native
-extension isn't built.
+extension isn't built (or for content too motion-dense for lossless truecolor).
 """
 from __future__ import annotations
 
@@ -33,16 +38,20 @@ def _native_available() -> bool:
         return False
 
 
-def _strength_params(s: float) -> tuple[float, int, float]:
-    """Map one 0..1 ``strength`` knob to (denoise, chroma_step, delta_threshold).
+def _strength_params(s: float) -> tuple[float, float, int, float]:
+    """Map one 0..1 ``strength`` knob to (temporal, denoise, chroma_step, delta_threshold).
 
-    All three reduce entropy the eye barely notices; the search picks the *lowest* strength
-    that fits, so fidelity is spent only as needed."""
+    Temporal stabilization is the primary lever — it exploits frame-to-frame redundancy
+    (static regions, grain, small motion) the way a video codec does, with no spatial
+    softening. The spatial tail (denoise/chroma) only engages near the top for pathological
+    full-frame motion. The search picks the *lowest* strength that fits, so fidelity is spent
+    only as needed."""
     c = max(0.0, min(1.0, s))
-    denoise = max(0.0, s)                  # uncapped: s>1 = heavier blur (guaranteed-fit resort)
-    chroma_step = 1 + int(round(c * 31))   # 1 (off) .. 32 (coarse chroma, ~grayscale at max)
-    delta_threshold = 0.02 + c * 0.06      # 1..4 JND temporal reuse
-    return denoise, chroma_step, delta_threshold
+    temporal = c                                       # primary: temporal redundancy + matte freeze
+    denoise = max(0.0, (s - 0.85) / 0.15)              # spatial blur: off until 0.85 (last resort)
+    chroma_step = 1 + int(round(max(0.0, s - 0.9) * 70))  # 1..~8: only the very top coarsens chroma
+    delta_threshold = 0.022 + c * 0.018                # ~1..2 JND temporal reuse
+    return temporal, denoise, chroma_step, delta_threshold
 
 
 def _decode_apng_frames(data: bytes):
@@ -85,19 +94,19 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
         return deadline is not None and (deadline - time.monotonic()) < 1.0
 
     def enc(strength: float) -> bytes:
-        den, ch, dt = _strength_params(strength)
+        temporal, den, ch, dt = _strength_params(strength)
         return fovea_native.encode_apng(
             [f.tobytes() for f in base], w, h, dcs, delta_threshold=dt, alpha_threshold=24,
-            loop_count=0, compression=4, denoise=den, chroma_step=ch)["png"]
+            loop_count=0, compression=4, temporal=temporal, denoise=den, chroma_step=ch)["png"]
 
-    # 1) Lossless attempt (no transforms). Cut-out / clean / static-bg stickers fit here.
+    # 1) Lossless attempt (no transforms). Truly clean/static clips fit here and ship pristine.
     data = enc(0.0)
     used = 0.0
     if len(data) > budget:
-        # 2) `CAP` is the most denoise we'll accept before it stops being grain-removal and
-        #    starts blurring real detail. If even CAP won't fit, this is dense full-frame
-        #    content truecolor can't hold cleanly -> bail fast to the legacy palette path
-        #    (one extra encode, no slow climb into mush).
+        # 2) Climb the temporal lever. `CAP` is the strongest stabilization we'll accept; if
+        #    even CAP won't fit, this is pathological full-frame motion truecolor can't hold ->
+        #    bail to the legacy palette path (one extra encode, no slow climb). Most stickers —
+        #    cut-out or not, static or handheld — fit far below CAP.
         cap = 0.85
         top = enc(cap)
         if len(top) > budget:
@@ -116,10 +125,10 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
                 lo = mid
         data, used = best
 
-    # 3) Perceptual gate: keep the truecolor APNG ONLY if it's genuinely clean. For dense
-    #    full-frame motion, fitting truecolor would require visibly blurring real detail
-    #    (mush) — the legacy shared-palette path stays sharp and uses the budget, so hand
-    #    back to it instead of shipping a blurred result. (Cut-out stickers pass easily.)
+    # 3) Perceptual gate: keep the truecolor APNG only if it stayed perceptually close. The
+    #    temporal lever is near-lossless for static/handheld content (it removes grain + small
+    #    motion the eye doesn't track), but pathological full-frame motion would need visible
+    #    temporal blur to fit — hand those back to the sharp legacy palette path instead.
     dist = None
     try:
         from encoder.core.frames import frames_from_list
@@ -136,7 +145,7 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
     if dist is not None and dist > accept:
         return None  # would be visibly soft — the palette path looks better here
 
-    report = {"mode": "cap", "format": "apng", "strength": round(used, 3),
+    report = {"mode": "temporal", "format": "apng", "strength": round(used, 3),
               "perceptual_distance": (round(dist, 6) if dist is not None else None),
               "perceptually_lossless": (bool(dist <= 0.02) if dist is not None else None)}
     kb = len(data) // 1024
@@ -146,8 +155,8 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
         if used <= 0.0:
             notes.append(f"APNG: full color, all {n} frames, losslessly ({kb} KB).")
         elif dist is not None and dist <= 0.02:
-            notes.append(f"APNG: all {n} frames at full color (no sepia) — removed imperceptible "
-                         f"grain to fit {kb} KB.")
+            notes.append(f"APNG: all {n} frames at full color (no sepia) — temporally stabilized "
+                         f"(removed grain the eye doesn't track) to fit {kb} KB.")
         else:
-            notes.append(f"APNG: all {n} frames at full color, lightly smoothed to fit {kb} KB.")
+            notes.append(f"APNG: all {n} frames at full color, temporally smoothed to fit {kb} KB.")
     return data, "APNG", n, fps, report

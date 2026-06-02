@@ -120,7 +120,7 @@ fn search<'py>(
 #[pyo3(signature = (
     frames, width, height, delays_cs,
     delta_threshold = 0.02, alpha_threshold = 24, loop_count = 0, compression = 4,
-    denoise = 0.0, chroma_step = 1,
+    temporal = 0.0, denoise = 0.0, chroma_step = 1,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn encode_apng<'py>(
@@ -133,6 +133,7 @@ fn encode_apng<'py>(
     alpha_threshold: u8,
     loop_count: u16,
     compression: u8,
+    temporal: f32,
     denoise: f32,
     chroma_step: u8,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -143,6 +144,7 @@ fn encode_apng<'py>(
         alpha_threshold,
         loop_count,
         compression,
+        temporal,
         denoise,
         chroma_step,
     };

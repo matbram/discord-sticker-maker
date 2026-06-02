@@ -16,40 +16,54 @@
 
 ## 0. Recent updates (latest session)
 
-### Fovea-APNG: perceptual-lossy *truecolor* APNG for the sticker — branch `claude/youthful-bell-Nr3rP`
+### Fovea-APNG: *truecolor* sticker via **temporal stabilization** (full color + every frame ≥24fps) — branch `claude/youthful-bell-Nr3rP`
 
 The animated **sticker** is APNG and used to wash out the same way the GIF did: the old path
 (`encode.py`) crushed every frame into **one shared palette** (the "sepia" the code comments
-call out). APNG's color type is global, so the GIF per-frame-palette fix can't port — but APNG
-supports **truecolor**, so the fix is "no palette at all." A native Rust truecolor APNG encoder
-now keeps **full color + every frame**, manufacturing the needed compression *perceptually*
-(APNG is lossless DEFLATE, no DCT):
+call out) *and dropped frames*. APNG's color type is global, so the GIF per-frame-palette fix
+can't port — but APNG supports **truecolor**, so the fix is "no palette at all." A native Rust
+truecolor APNG encoder keeps **full color + every frame**, manufacturing the needed compression
+*perceptually* (APNG is lossless DEFLATE, no DCT). The dominant lever is **temporal**, the way a
+video codec works — earlier spatial-only denoise couldn't fit dense clips (it denoises each
+frame independently, so frames still differ → the delta bbox covers the whole subject and gets
+re-sent every frame). Diagnosed via prototypes: a grainy cut-out at strength-1 spatial was still
+**2.9 MB**; with temporal it's **~200–440 KB, all frames, perceptually lossless.**
 
-- **`fovea-core/src/apng.rs`** (new, `png` 0.18 crate): truecolor RGBA APNG with
-  - **OKLab inter-frame delta** — redraw only the bbox of pixels the eye sees change
-    (`blend=SOURCE` over the bbox, which correctly *erases* when a cut-out subject moves —
-    `OVER` can't); reuses the `oklab` module + the GIF delta idea.
-  - **Perceptual entropy reduction** (the "fool perception" part): edge-aware denoise gated by
-    OKLab ΔE (grain/gradients are sub-JND from their blur → smoothed; edges preserved → kept)
-    and YCoCg **chroma reduction**. A single `strength` knob (radius + edge-override + chroma)
-    scales both; grain is incompressible noise the eye doesn't track, so removing it shrinks
-    the deflated truecolor dramatically and invisibly.
-- **`backend/app/pipeline/fovea_apng.py`** (new) `apng_encode`: try lossless (strength 0); else
-  bisect strength up to a cap (~0.85, still grain-removal not mush) for the lowest that fits;
-  then a **perceptual gate** — keep the truecolor APNG only if the color-aware distance is low
-  (cut-out / clean / static-bg). For dense full-frame motion where fitting truecolor would mean
-  visibly **blurring** real detail, return ``None`` so the orchestrator uses the **legacy sharp
-  shared-palette** path (never a blurred/frame-dropped result — an early bail keeps it fast).
-  Honesty report via `default_metric()`; ``FOVEA_APNG_ACCEPT`` tunes the gate.
-- **`fovea-core/src/python.rs`** `encode_apng` PyO3 binding; **`orchestrator.py`** sticker
-  branch routes to `apng_encode`. Serving already treats APNG as `image/png` (valid); the
-  checklist already accepts APNG.
-- **Measured (320×320×29f, 512KB):** cut-out grainy → 517 KB, all 29 frames, ΔE 0.008
-  (perceptually lossless, full color); clean → 4.8 KB lossless; realistic non-cutout → 475 KB,
-  all 29 frames, lightly softened; pathological full-frame motion → fits by trimming to 9
-  frames (full color, noted). 6 cargo + 71 pytest green.
-- **Next (Phase 3):** foveation/ROI (keep the subject crisp, blur periphery) to fit dense
-  full-frame clips at *all* frames; a running-sum box blur to speed the heavy-strength path.
+- **`fovea-core/src/apng.rs`** (`png` 0.18 crate): truecolor RGBA APNG with
+  - **Temporal stabilization** (`temporal_stabilize`, the big lever): per pixel across the clip,
+    truly-static pixels (low temporal luma std) collapse to their **temporal mean** — a constant
+    across frames, so the delta draws them once and reuses them forever; active pixels run a
+    **motion-gated IIR** (eases toward each frame to average out grain, snaps to current when it
+    moves > `motion` so motion stays crisp — no ghosting). Strength raises `static_thr`/lowers
+    `ema`/raises `motion` (smooth *through* small motion = mild natural motion-blur, never
+    spatial mush).
+  - **Alpha-matte stabilization** (`stabilize_alpha`): a per-frame rembg matte shimmers along
+    the edge — that churn **is the "weird shader" artifact**, and it forces every delta frame
+    into the costly SOURCE path. Each pixel whose alpha is temporally stable (std < a
+    strength-scaled threshold — fixed silhouette or pure shimmer) is **frozen to its whole-clip
+    median** (constant matte, soft edge preserved, zero erasures); genuinely-moving silhouettes
+    take a short windowed median (tracks, those frames legitimately use SOURCE).
+  - **OKLab inter-frame delta with an OVER/SOURCE hybrid**: within the changed bbox, **OVER**
+    carries only the changed pixels (unchanged → transparent = no-op, deflates to ~nothing) —
+    this was the missing 4× win (SOURCE re-sent the whole bbox interior). A frame that *erases*
+    a pixel (opaque→transparent, which OVER can't express) uses **SOURCE** instead; the matte
+    freeze keeps erasures ~0 for static/handheld subjects so OVER carries almost every frame.
+  - Spatial denoise + YCoCg chroma reduction remain as a last-resort high-strength tail.
+- **`backend/app/pipeline/fovea_apng.py`** `apng_encode`: try lossless (strength 0); else bisect
+  the **temporal** strength up to a cap (~0.85) for the lowest that fits; then a **perceptual
+  gate** — keep the truecolor APNG only if color-aware distance ≤ `FOVEA_APNG_ACCEPT` (0.045).
+  Only pathological full-frame motion (where fitting needs visible temporal blur) returns
+  ``None`` → orchestrator uses the legacy sharp shared-palette path. Honesty report via
+  `default_metric()`.
+- **`fovea-core/src/python.rs`** `encode_apng` binding (added `temporal` arg); **`orchestrator.py`**
+  sticker branch routes to `apng_encode`. Serving treats APNG as `image/png`; checklist accepts APNG.
+- **Measured (320×320×29f, 512KB, all frames, full color):** static cut-out portrait → **436 KB,
+  25 fps, dist 0.014 (lossless)**; handheld bob → **205 KB, 25 fps, dist 0.033**; opaque
+  non-cut-out static-bg portrait → 422 KB (29f) / 427 KB (48f), 30 fps, dist 0.018; extreme
+  continuous full-frame motion → gate→legacy (honest). 5 cargo + 78 pytest green; PIL-composited
+  round-trip confirms OVER/SOURCE compositing is correct (no ghosting).
+- **Next:** global motion compensation via the APNG fcTL frame offset (cancel camera bob/pan so
+  even handheld clips with large translation stay all-frames truecolor); running-sum box blur.
 
 
 ### Animated output is a Format choice: GIF (largest perceptually-lossless) | WebP (source res) — branch `claude/youthful-bell-Nr3rP`
@@ -667,7 +681,9 @@ Plumbing: controls → `OutputSpec.max_bytes/max_dim/priority/mode` → orchestr
 - **gifski is not installed in the image** (no apt package). ffmpeg + gifsicle
   are (apt; we disabled two broken PPAs — deadsnakes/ondrej — to install them).
   Fovea works on ffmpeg alone, so gifski is optional.
-- **Sticker = APNG = legacy encoder.** Fovea only touches GIF/emoji.
+- **Sticker = APNG = native truecolor encoder** (`fovea_apng`/`apng.rs`, temporal
+  stabilization; §0), with the legacy shared-palette `encode_animated` as the fallback for
+  motion-dense content. Emoji stays GIF.
 - **M2 `.onnx` is gitignored and not in the Docker image** — `FOVEA_METRIC=learned` only
   does something where the model + onnxruntime are present (else it warns and falls back
   to MS-SSIM). Wiring the artifact into the image is outstanding (§0/§8.3).

@@ -6,15 +6,26 @@
 //! instead the inter-frame delta: keep an OKLab canvas and redraw only the pixels the eye
 //! can see change (ΔE >= ~1 JND), as an APNG sub-frame over the changed bounding box.
 //!
-//! We use `blend_op = SOURCE` over the bounding box (not GIF's transparent-index + OVER):
-//! OVER can only paint on top, so it can't erase a pixel back to transparent when a cut-out
-//! subject moves away — SOURCE replaces the whole sub-rect, which is correct for every
-//! transition (color change, reveal, erase) and still small because the sub-rect is the
-//! tight bbox of perceptible change.
+//! Each delta sub-frame uses one of two blend modes, chosen per frame:
+//!   * `OVER` (the efficient default) — within the changed bbox, only the perceptibly-changed
+//!     pixels carry data; every unchanged pixel is written fully-transparent, which is an OVER
+//!     no-op (keeps the canvas) and deflates to almost nothing. This is the big lever: a
+//!     mostly-static subject re-sends only the handful of pixels that actually moved, not the
+//!     whole bounding box. It is only correct when no pixel needs to be *erased* (opaque ->
+//!     transparent), since OVER can paint but not clear.
+//!   * `SOURCE` — replaces the whole sub-rect. Used for the rare frames that DO erase a pixel
+//!     (a cut-out subject's silhouette genuinely moving), where OVER would leave a stale trail.
 //!
-//! Phase 2 will add perceptual entropy-reduction transforms (denoise / chroma / adaptive
-//! precision) so dense full-frame stickers fit the byte budget at full color. This module
-//! is the foundation: full-color + every-frame + delta reuse.
+//! Phase 2 manufactures the lossiness perceptually so dense full-frame stickers fit the byte
+//! budget at full color. The dominant lever is **temporal**: real clips have enormous
+//! frame-to-frame redundancy that a lossless per-frame palette throws away. We
+//!   * flatten truly-static pixels to their temporal mean (a constant across frames -> the
+//!     delta sends them once and reuses them forever), and motion-gate-smooth the rest
+//!     (suppresses sensor grain without ghosting moving regions), and
+//!   * stabilize the alpha matte (a windowed temporal median + gentle snap) so the per-frame
+//!     matte shimmer — the "weird shader" edge artifact — stops churning, which also keeps the
+//!     silhouette still enough that OVER (not SOURCE) carries almost every frame.
+//! Spatial denoise + chroma reduction remain as a last-resort tail for pathological motion.
 
 use png::{BitDepth, BlendOp, ColorType, Compression, DisposeOp, Encoder};
 use rayon::prelude::*;
@@ -177,15 +188,174 @@ fn chroma_reduce(rgba: &[u8], step: u8) -> Vec<u8> {
     out
 }
 
-/// Apply the perceptual transforms to every frame (parallel). `denoise` 0..1, `chroma_step`
-/// 1=off. Returns new frames; the delta encoder then runs on these.
-fn preprocess(frames: &[Vec<u8>], w: usize, h: usize, denoise: f32, chroma_step: u8) -> Vec<Vec<u8>> {
-    if denoise <= 0.0 && chroma_step <= 1 {
+/// Map the 0..1 temporal `strength` to the three internal knobs:
+///   * `static_thr` — a pixel whose temporal luma std is below this is "static" and gets
+///     flattened to its temporal mean (zero delta). Higher strength trusts more pixels as
+///     static, flattening more (the big size lever).
+///   * `ema` — smoothing for active (non-static) pixels; lower = stronger grain suppression.
+///   * `motion` — RGB distance (vs the running clean estimate) above which a pixel is treated
+///     as moving, disabling smoothing so motion stays sharp (no ghosting).
+fn temporal_params(strength: f32) -> (f32, f32, f32) {
+    let t = strength.clamp(0.0, 1.0);
+    let static_thr = 2.0 + t * 14.0; // 2..16 luma codes: flatten more pixels as strength rises
+    let ema = 0.5 - t * 0.34; // 0.5..0.16: heavier grain suppression at high strength
+    // `motion` is the gate above which a pixel is "moving" and smoothing is disabled. Raising
+    // it with strength lets the filter smooth *through* small motion — a mild, natural-looking
+    // temporal (motion) blur that buys huge reuse, unlike spatial blur it doesn't soften detail.
+    let motion = 18.0 + t * 52.0; // 18..70
+    (static_thr, ema, motion)
+}
+
+/// Alpha temporal-std threshold below which a silhouette is "static" and frozen (see
+/// `stabilize_alpha`). Scales with strength so higher strength freezes through more silhouette
+/// motion (a bobbing/handheld subject), trading a sub-pixel silhouette wobble for the OVER win.
+fn alpha_static_std(strength: f32) -> f32 {
+    22.0 + strength.clamp(0.0, 1.0) * 70.0 // 22..92
+}
+
+/// Temporal stabilization (per pixel, across the clip): the core size lever. A pixel that is
+/// ~constant over time (temporal luma std < `static_thr`) is replaced by its temporal mean in
+/// EVERY frame — it becomes identical frame-to-frame, so the delta encoder draws it once and
+/// reuses it forever. A pixel that varies is run through a motion-gated IIR: while it's stable
+/// the estimate eases toward each frame (averaging out sensor grain, which is what makes
+/// consecutive frames differ); when it moves more than `motion`, the estimate snaps to the
+/// current value so real motion stays crisp. Alpha is left untouched (stabilized separately).
+fn temporal_stabilize(frames: &[Vec<u8>], w: usize, h: usize, strength: f32) -> Vec<Vec<u8>> {
+    let n = frames.len();
+    if strength <= 0.0 || n < 4 {
         return frames.to_vec();
     }
+    let (static_thr, ema, motion) = temporal_params(strength);
+    let npix = w * h;
+    let mut out = frames.to_vec();
+    let motion2 = motion * motion;
+    let inv_n = 1.0 / n as f32;
+    for p in 0..npix {
+        let i4 = p * 4;
+        let (mut sr, mut sg, mut sb, mut sl, mut sll) = (0f32, 0f32, 0f32, 0f32, 0f32);
+        for f in frames {
+            let (r, g, b) = (f[i4] as f32, f[i4 + 1] as f32, f[i4 + 2] as f32);
+            let l = 0.299 * r + 0.587 * g + 0.114 * b;
+            sr += r;
+            sg += g;
+            sb += b;
+            sl += l;
+            sll += l * l;
+        }
+        let lmean = sl * inv_n;
+        let std = (sll * inv_n - lmean * lmean).max(0.0).sqrt();
+        if std < static_thr {
+            // Static: collapse the whole time series to its mean -> zero delta after frame 0.
+            let mr = (sr * inv_n).round().clamp(0.0, 255.0) as u8;
+            let mg = (sg * inv_n).round().clamp(0.0, 255.0) as u8;
+            let mb = (sb * inv_n).round().clamp(0.0, 255.0) as u8;
+            for f in &mut out {
+                f[i4] = mr;
+                f[i4 + 1] = mg;
+                f[i4 + 2] = mb;
+            }
+        } else {
+            // Active: motion-gated temporal IIR (grain suppression that tracks motion).
+            let mut acc = [frames[0][i4] as f32, frames[0][i4 + 1] as f32, frames[0][i4 + 2] as f32];
+            for f in 1..n {
+                let cur = [frames[f][i4] as f32, frames[f][i4 + 1] as f32, frames[f][i4 + 2] as f32];
+                let d2 = (cur[0] - acc[0]).powi(2) + (cur[1] - acc[1]).powi(2) + (cur[2] - acc[2]).powi(2);
+                if d2 > motion2 {
+                    acc = cur;
+                } else {
+                    for c in 0..3 {
+                        acc[c] = acc[c] * (1.0 - ema) + cur[c] * ema;
+                    }
+                }
+                out[f][i4] = acc[0].round().clamp(0.0, 255.0) as u8;
+                out[f][i4 + 1] = acc[1].round().clamp(0.0, 255.0) as u8;
+                out[f][i4 + 2] = acc[2].round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Stabilize the alpha matte. A per-frame matte (e.g. rembg run independently per frame)
+/// shimmers along the subject edge; that churn is the "weird shader" artifact AND it forces
+/// every delta frame into the costly SOURCE path (an edge pixel wobbling across the opacity
+/// boundary reads as an erase, which `OVER` cannot express). For each pixel:
+///   * if its alpha is temporally *stable* (std below `astatic_std` — i.e. a fixed silhouette
+///     or pure shimmer, not motion), freeze it to its whole-clip median: a constant matte that
+///     never crosses the boundary, so the silhouette is drawn once and reused (zero erasures)
+///     and the soft anti-aliased edge is preserved (we don't binarize);
+///   * otherwise (a genuinely moving silhouette) take a short windowed median, which rejects
+///     shimmer while still tracking the motion (those frames legitimately use SOURCE).
+/// The extremes are gently snapped (near-0 -> 0, near-255 -> 255) to clean residual fringe.
+fn stabilize_alpha(frames: &mut [Vec<u8>], w: usize, h: usize, win: usize, astatic_std: f32) {
+    let n = frames.len();
+    if n < 3 || n > 64 {
+        return;
+    }
+    let npix = w * h;
+    let orig: Vec<Vec<u8>> = frames.iter().map(|f| (0..npix).map(|p| f[p * 4 + 3]).collect()).collect();
+    let inv_n = 1.0 / n as f32;
+    let snap = |a: u8| -> u8 {
+        if a < 8 {
+            0
+        } else if a > 247 {
+            255
+        } else {
+            a
+        }
+    };
+    for p in 0..npix {
+        let (mut s, mut ss) = (0f32, 0f32);
+        for j in 0..n {
+            let a = orig[j][p] as f32;
+            s += a;
+            ss += a * a;
+        }
+        let mean = s * inv_n;
+        let std = (ss * inv_n - mean * mean).max(0.0).sqrt();
+        let mut buf = [0u8; 64];
+        if std < astatic_std {
+            for j in 0..n {
+                buf[j] = orig[j][p];
+            }
+            buf[..n].sort_unstable();
+            let a = snap(buf[n / 2]);
+            for f in frames.iter_mut() {
+                f[p * 4 + 3] = a;
+            }
+        } else {
+            for f in 0..n {
+                let lo = f.saturating_sub(win);
+                let hi = (f + win).min(n - 1);
+                let mut k = 0usize;
+                for j in lo..=hi {
+                    buf[k] = orig[j][p];
+                    k += 1;
+                }
+                buf[..k].sort_unstable();
+                frames[f][p * 4 + 3] = snap(buf[k / 2]);
+            }
+        }
+    }
+}
+
+/// Apply the perceptual transforms to every frame. Order matters: temporal first (it sets the
+/// frame-to-frame redundancy the delta exploits and removes most grain), then alpha
+/// stabilization (clean edges for both quality and the OVER path), then the spatial tail
+/// (denoise + chroma) which only engages at high strength for pathological motion.
+fn preprocess(frames: &[Vec<u8>], w: usize, h: usize, temporal: f32, denoise: f32, chroma_step: u8) -> Vec<Vec<u8>> {
+    if temporal <= 0.0 && denoise <= 0.0 && chroma_step <= 1 {
+        return frames.to_vec();
+    }
+    let mut work = temporal_stabilize(frames, w, h, temporal);
+    if temporal > 0.0 {
+        stabilize_alpha(&mut work, w, h, 2, alpha_static_std(temporal));
+    }
+    if denoise <= 0.0 && chroma_step <= 1 {
+        return work;
+    }
     let lut = srgb_to_linear_lut();
-    frames
-        .par_iter()
+    work.par_iter()
         .map(|f| {
             let d = denoise_frame(f, w, h, denoise, &lut);
             chroma_reduce(&d, chroma_step)
@@ -206,7 +376,10 @@ pub struct ApngOpts {
     pub loop_count: u16,
     /// 0=none,1=fastest,2=fast,3=balanced,4=high (DEFLATE effort).
     pub compression: u8,
-    /// Perceptual entropy reduction (Phase 2): edge-aware denoise strength 0..1 (grain removal).
+    /// Temporal stabilization strength 0..1 (the dominant size lever): flatten static pixels
+    /// to their temporal mean + motion-gated grain suppression + alpha-matte stabilization.
+    pub temporal: f32,
+    /// Perceptual entropy reduction (spatial tail): edge-aware denoise strength 0..1 (grain removal).
     pub denoise: f32,
     /// Chroma quantization step (1 = off; higher = coarser chroma, lower entropy).
     pub chroma_step: u8,
@@ -258,9 +431,9 @@ pub fn encode_apng(frames: &[Vec<u8>], delays_cs: &[u16], opts: &ApngOpts) -> Re
     let npix = w * h;
     validate(frames, delays_cs, w, h)?;
 
-    // Phase 2: perceptually reduce entropy (denoise grain, coarsen chroma) so truecolor fits
-    // the byte budget. No-op when denoise=0 and chroma_step<=1 (Phase 1 lossless behavior).
-    let processed = preprocess(frames, w, h, opts.denoise, opts.chroma_step);
+    // Phase 2: perceptually reduce entropy (temporal stabilization, then the spatial tail) so
+    // truecolor fits the byte budget. No-op when all knobs are off (Phase 1 lossless behavior).
+    let processed = preprocess(frames, w, h, opts.temporal, opts.denoise, opts.chroma_step);
     let frames: &[Vec<u8>] = &processed;
 
     let lut = srgb_to_linear_lut();
@@ -294,10 +467,12 @@ pub fn encode_apng(frames: &[Vec<u8>], delays_cs: &[u16], opts: &ApngOpts) -> Re
         writer.set_frame_delay(delays_cs[0].max(1), 100).map_err(|e| format!("apng f0 delay: {e}"))?;
         writer.write_image_data(&frames[0]).map_err(|e| format!("apng write f0: {e}"))?;
 
+        let mut changed_mask = vec![false; npix];
         for i in 1..n {
             let src = &frames[i];
             let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0usize, 0usize);
             let mut changed = 0usize;
+            let mut erase = 0usize; // pixels going opaque -> transparent (OVER cannot clear these)
             for y in 0..h {
                 for x in 0..w {
                     let p = y * w + x;
@@ -306,12 +481,18 @@ pub fn encode_apng(frames: &[Vec<u8>], delays_cs: &[u16], opts: &ApngOpts) -> Re
                     let ca = canvas[idx + 3] as i16;
                     // Two transparent pixels look identical regardless of RGB.
                     if a < 128 && ca < 128 {
+                        changed_mask[p] = false;
                         continue;
                     }
                     let alpha_changed = (a - ca).abs() > alpha_thr;
                     let lab = rgb_to_oklab(src[idx], src[idx + 1], src[idx + 2], &lut);
-                    if alpha_changed || delta_e_sq(&lab, &canvas_lab[p]) >= thr2 {
+                    let is_changed = alpha_changed || delta_e_sq(&lab, &canvas_lab[p]) >= thr2;
+                    changed_mask[p] = is_changed;
+                    if is_changed {
                         changed += 1;
+                        if ca >= 128 && a < 128 {
+                            erase += 1;
+                        }
                         min_x = min_x.min(x);
                         min_y = min_y.min(y);
                         max_x = max_x.max(x);
@@ -338,6 +519,9 @@ pub fn encode_apng(frames: &[Vec<u8>], delays_cs: &[u16], opts: &ApngOpts) -> Re
             }
             changed_frames += 1;
 
+            // OVER (carry only changed pixels; unchanged -> transparent no-op) unless this
+            // frame erases a pixel back to transparent, which OVER can't express -> SOURCE.
+            let use_source = erase > 0;
             let bw = max_x - min_x + 1;
             let bh = max_y - min_y + 1;
             let mut sub = vec![0u8; bw * bh * 4];
@@ -346,23 +530,27 @@ pub fn encode_apng(frames: &[Vec<u8>], delays_cs: &[u16], opts: &ApngOpts) -> Re
                     let gp = (min_y + yy) * w + (min_x + xx);
                     let gi = gp * 4;
                     let sp = (yy * bw + xx) * 4;
-                    sub[sp] = src[gi];
-                    sub[sp + 1] = src[gi + 1];
-                    sub[sp + 2] = src[gi + 2];
-                    sub[sp + 3] = src[gi + 3];
-                    // The whole bbox is redrawn (SOURCE), so the canvas there becomes frame i.
-                    canvas[gi] = src[gi];
-                    canvas[gi + 1] = src[gi + 1];
-                    canvas[gi + 2] = src[gi + 2];
-                    canvas[gi + 3] = src[gi + 3];
-                    canvas_lab[gp] = rgb_to_oklab(src[gi], src[gi + 1], src[gi + 2], &lut);
+                    if use_source || changed_mask[gp] {
+                        // Paint the new pixel; the displayed canvas there becomes frame i.
+                        sub[sp] = src[gi];
+                        sub[sp + 1] = src[gi + 1];
+                        sub[sp + 2] = src[gi + 2];
+                        sub[sp + 3] = src[gi + 3];
+                        canvas[gi] = src[gi];
+                        canvas[gi + 1] = src[gi + 1];
+                        canvas[gi + 2] = src[gi + 2];
+                        canvas[gi + 3] = src[gi + 3];
+                        canvas_lab[gp] = rgb_to_oklab(src[gi], src[gi + 1], src[gi + 2], &lut);
+                    }
+                    // else (OVER, unchanged): leave sub fully transparent -> keeps the canvas.
                 }
             }
             writer.reset_frame_position().map_err(|e| format!("apng reset {i}: {e}"))?;
             writer.set_frame_dimension(bw as u32, bh as u32).map_err(|e| format!("apng dim {i}: {e}"))?;
             writer.set_frame_position(min_x as u32, min_y as u32).map_err(|e| format!("apng pos {i}: {e}"))?;
             writer.set_dispose_op(DisposeOp::None).map_err(|e| format!("apng dispose {i}: {e}"))?;
-            writer.set_blend_op(BlendOp::Source).map_err(|e| format!("apng blend {i}: {e}"))?;
+            let blend = if use_source { BlendOp::Source } else { BlendOp::Over };
+            writer.set_blend_op(blend).map_err(|e| format!("apng blend {i}: {e}"))?;
             writer.set_frame_delay(delay, 100).map_err(|e| format!("apng delay {i}: {e}"))?;
             writer.write_image_data(&sub).map_err(|e| format!("apng write {i}: {e}"))?;
         }
@@ -410,6 +598,7 @@ mod tests {
             alpha_threshold: 24,
             loop_count: 0,
             compression: 4,
+            temporal: 0.0,
             denoise: 0.0,
             chroma_step: 1,
         };
@@ -438,11 +627,55 @@ mod tests {
             alpha_threshold: 24,
             loop_count: 0,
             compression: 4,
+            temporal: 0.0,
             denoise: 0.0,
             chroma_step: 1,
         };
         let out = encode_apng(&[f.clone(), f.clone(), f], &[10, 10, 10], &opts).unwrap();
         assert_eq!(out.changed_frames, 0, "identical frames must not redraw");
+    }
+
+    #[test]
+    fn temporal_collapses_static_grain() {
+        // A static scene with per-frame grain: spatially every pixel wiggles, but each pixel
+        // is temporally static. Temporal stabilization must flatten it so almost no frame
+        // redraws (the delta reuses the flattened canvas) — proving the redundancy lever.
+        let w = 24;
+        let h = 24;
+        let n = 12;
+        let base = solid(w, h, [130, 90, 60, 255]);
+        let mut frames = Vec::new();
+        for f in 0..n {
+            let mut fr = base.clone();
+            for p in 0..w * h {
+                // deterministic pseudo-grain in ±6, different each frame
+                let g = (((p * 31 + f * 17) % 13) as i16) - 6;
+                let i = p * 4;
+                for c in 0..3 {
+                    fr[i + c] = (fr[i + c] as i16 + g).clamp(0, 255) as u8;
+                }
+            }
+            frames.push(fr);
+        }
+        let delays = vec![10u16; n];
+        let mk = |temporal: f32| ApngOpts {
+            width: w as u32,
+            height: h as u32,
+            delta_threshold: 0.03,
+            alpha_threshold: 24,
+            loop_count: 0,
+            compression: 4,
+            temporal,
+            denoise: 0.0,
+            chroma_step: 1,
+        };
+        let raw = encode_apng(&frames, &delays, &mk(0.0)).unwrap();
+        let stab = encode_apng(&frames, &delays, &mk(0.6)).unwrap();
+        // Temporal stabilization must both shrink the file and cut the redrawn frames sharply.
+        assert!(stab.png.len() * 2 < raw.png.len(),
+            "temporal should at least halve bytes: raw={} stab={}", raw.png.len(), stab.png.len());
+        assert!(stab.changed_frames <= 2,
+            "static grain should collapse to <=2 changed frames, got {}", stab.changed_frames);
     }
 
     #[test]
@@ -462,6 +695,7 @@ mod tests {
             alpha_threshold: 24,
             loop_count: 0,
             compression: 4,
+            temporal: 0.0,
             denoise: 0.0,
             chroma_step: 1,
         };
