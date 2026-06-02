@@ -16,6 +16,26 @@
 
 ## 0. Recent updates (latest session)
 
+### GIF dimensions: explicit W×H + "Source" (None) — branch `claude/youthful-bell-Nr3rP`
+
+The GIF dimension model was confusing: a single number (`max_dim`) meant the **longest
+edge** and the shape came from a *separate* "GIF shape" control, so "320" on a 360×640
+source produced 180×320, not 320×320. Replaced with **direct width×height entry** plus a
+**Source** option (the requested "None"):
+- **`OutputSpec.width`/`OutputSpec.height`** (`models.py`): both set → GIF is cropped to
+  *exactly* W×H (aspect = W:H). Neither set → keep the **source's own resolution** (the
+  "None"/Source default; up to the 640px working cap). `max_dim`+`aspect` stay as a
+  back-compat fallback for old clients. Fovea's resolution-for-color search is then the
+  only thing that shrinks a GIF to fit the byte budget.
+- **`orchestrator.py`** GIF branch resolves dims in that order; the square sticker/emoji
+  path is unchanged. **`validate.py`** GIF checklist no longer asserts the dead
+  `max_dim` cap — it shows the actual `W×H` instead.
+- **Frontend** (`App.svelte`, `OutputStrip.svelte`, `cropMath.js`): the GIF "Dimensions"
+  control is now **Source | Custom W×H** (two number inputs); the separate "GIF shape"
+  Square/Source/16:9 control is **removed** (W×H subsumes it). Live preview aspect comes
+  from the chosen W×H (or source) via the shared `gifAspect()` helper. Sticker/emoji keep
+  their square `{size}px` presets. `npm run build` clean; 71 backend tests pass.
+
 ### Resolution-for-color: the third RD lever (fixes washout while keeping ≥24 frames) — branch `claude/youthful-bell-Nr3rP`
 
 **Symptom.** On detailed/grainy clips (a John Wick 512×288 movie clip; an IMG_7064

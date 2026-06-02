@@ -5,7 +5,7 @@
   import ProgramMonitor from './lib/ProgramMonitor.svelte'
   import OutputStrip from './lib/OutputStrip.svelte'
   import Timeline from './lib/Timeline.svelte'
-  import { resolveAspect } from './lib/cropMath.js'
+  import { gifAspect } from './lib/cropMath.js'
 
   const TYPES = [
     { id: 'gif', emoji: '🎞️', label: 'GIF', blurb: 'shareable in chat' },
@@ -19,7 +19,7 @@
       remove_bg: false, bg_model: 'auto', auto_crop: true, fit_mode: 'fill',
       zoom: 1.0, offset_x: 0.0, offset_y: 0.0, padding: 0.06,
       max_fps: 18, max_duration_s: 4.0, trim_start_s: 0.0,
-      priority: 'balanced', max_colors: 256, gif_quality: 'balanced', gif_aspect: 'source'
+      priority: 'balanced', max_colors: 256, gif_quality: 'balanced'
     }
   }
 
@@ -53,9 +53,11 @@
     { label: '5 MB', v: 5242880 }, { label: '8 MB', v: 8388608 }
   ]
   const DIM_PRESETS = [128, 256, 320, 360, 480, 512]
+  // GIF dimensions are width×height (or null/null = Source: keep the source's own size).
+  // Sticker/emoji are square, so they keep a single side (`dim`).
   function defaultLimits() {
     return {
-      gif: { bytes: 5242880, dim: 360 },
+      gif: { bytes: 5242880, width: null, height: null },
       sticker: { bytes: 524288, dim: 320 },
       emoji: { bytes: 262144, dim: 128 }
     }
@@ -158,9 +160,18 @@
   function buildOutputs() {
     const f = (t) => ({ zoom: framing[t].zoom, offset_x: framing[t].offset_x, offset_y: framing[t].offset_y, fit_mode: framing[t].fit_mode })
     const list = []
-    const lim = (t) => ({ max_bytes: limits[t].bytes, max_dim: limits[t].dim })
+    const lim = (t) => {
+      if (t === 'gif') {
+        const g = limits.gif
+        // Custom W×H -> send exact dims; Source (null/null) -> send nothing, backend keeps source res.
+        return (g.width && g.height)
+          ? { max_bytes: g.bytes, width: g.width, height: g.height }
+          : { max_bytes: g.bytes }
+      }
+      return { max_bytes: limits[t].bytes, max_dim: limits[t].dim }
+    }
     const opt = (t) => ({ priority: outopts[t].priority, mode: outopts[t].mode })
-    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, aspect: params.gif_aspect, ...opt('gif'), ...lim('gif'), ...f('gif') })
+    if (selected.gif) list.push({ type: 'gif', gif_quality: params.gif_quality, ...opt('gif'), ...lim('gif'), ...f('gif') })
     if (selected.sticker) list.push({ type: 'sticker', ...opt('sticker'), ...lim('sticker'), ...f('sticker') })
     if (selected.emoji) list.push({ type: 'emoji', ...opt('emoji'), ...lim('emoji'), ...f('emoji') })
     return list
@@ -248,9 +259,17 @@
     return `Some visible loss to fit the size limit${where}.${early}`
   }
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
-  function setGifAspect(a) { params = { ...params, gif_aspect: a }; scheduleRegen() }
   function setLimitBytes(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], bytes: v } }; persistLimits(); scheduleRegen() }
   function setLimitDim(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], dim: v } }; persistLimits(); scheduleRegen() }
+  // GIF dimensions: Source (null W×H) keeps the source's own size; Custom uses exact W×H.
+  function setGifDims(w, h) { limits = { ...limits, gif: { ...limits.gif, width: w, height: h } }; persistLimits(); scheduleRegen() }
+  function useGifSource() { setGifDims(null, null) }
+  function useGifCustom() {   // seed from the source the first time; keep prior values otherwise
+    if (!(limits.gif.width && limits.gif.height)) setGifDims(sourceW || 320, sourceH || 320)
+  }
+  const clampDim = (v) => Math.min(1024, Math.max(16, Math.round(parseFloat(v) || 0)))
+  function setGifW(e) { setGifDims(clampDim(e.target.value), limits.gif.height || sourceH || 320) }
+  function setGifH(e) { setGifDims(limits.gif.width || sourceW || 320, clampDim(e.target.value)) }
   // Parse a freeform size like "800KB" / "3.5MB" (binary units, matching the encoder).
   function parseSize(str) {
     const m = String(str).trim().match(/^([0-9]*\.?[0-9]+)\s*(b|kb|kib|mb|mib|g|gb|gib)?$/i)
@@ -291,7 +310,9 @@
   $: userOutputs = outputs.filter((o) => !String(o.type).includes('__cmp'))
 
   $: fr = framing[focusedType] || framing.gif
-  $: focusAspect = focusedType === 'gif' ? resolveAspect(params.gif_aspect, sourceW, sourceH) : [1, 1]
+  $: gifCustom = !!(limits.gif?.width && limits.gif?.height)
+  $: gifAR = gifAspect(limits.gif?.width, limits.gif?.height, sourceW, sourceH)
+  $: focusAspect = focusedType === 'gif' ? gifAR : [1, 1]
   $: focusOut = outputs.find((o) => o.type === focusedType)
   $: focusBaked = focusOut && doneJob ? previewUrl(focusedType) : ''
   $: focusMeta = TYPES.find((t) => t.id === focusedType) || TYPES[0]
@@ -389,7 +410,7 @@
 
         <div class="strip-card">
           <div class="strip-head"><span>Your outputs</span><span class="muted-line">click a format to edit it · shared edits apply to all</span></div>
-          <OutputStrip types={TYPES} {selected} {focusedType} {params} {framing}
+          <OutputStrip types={TYPES} {selected} {focusedType} {params} {framing} {gifAR}
                        src={sourceUrl} isVideo={sourceIsVideo} naturalW={sourceW} naturalH={sourceH}
                        {outputs} jobId={doneJob} {previewBg} {busy} on:focus={focusOutput} />
         </div>
@@ -445,13 +466,34 @@
             <input class="custom-in" type="text" placeholder="custom — e.g. 800KB, 3.5MB" on:change={setCustomBytes} on:keydown={(e) => e.key === 'Enter' && setCustomBytes(e)} />
             <span class="muted-line">Target: {fmtBytes(limits[focusedType]?.bytes)}</span>
           </div>
-          <div class="ctl"><span class="ctl-label">Dimensions</span>
-            <div class="chips">
-              {#each DIM_PRESETS as d}<button class="chip" class:on={limits[focusedType]?.dim === d} on:click={() => setLimitDim(d)}>{d}px</button>{/each}
+          {#if focusedType === 'gif'}
+            <div class="ctl"><span class="ctl-label">Dimensions</span>
+              <div class="chips">
+                <button class="chip" class:on={!gifCustom} on:click={useGifSource}>Source</button>
+                <button class="chip" class:on={gifCustom} on:click={useGifCustom}>Custom W×H</button>
+              </div>
+              {#if gifCustom}
+                <div class="wh-row">
+                  <input class="custom-in wh" type="number" min="16" max="1024" placeholder="width"
+                         value={limits.gif.width ?? ''} on:change={setGifW} />
+                  <span class="wh-x">×</span>
+                  <input class="custom-in wh" type="number" min="16" max="1024" placeholder="height"
+                         value={limits.gif.height ?? ''} on:change={setGifH} />
+                </div>
+                <span class="muted-line">Output {limits.gif.width}×{limits.gif.height} px (may shrink to fit the file size limit).</span>
+              {:else}
+                <span class="muted-line">Keeps the source size{sourceW ? ` (${sourceW}×${sourceH})` : ''} — only the file size limit shrinks it.</span>
+              {/if}
             </div>
-            <input class="custom-in" type="number" min="16" max="1024" placeholder="custom px" on:change={setCustomDim} />
-            <span class="muted-line">Size: {limits[focusedType]?.dim}px</span>
-          </div>
+          {:else}
+            <div class="ctl"><span class="ctl-label">Dimensions</span>
+              <div class="chips">
+                {#each DIM_PRESETS as d}<button class="chip" class:on={limits[focusedType]?.dim === d} on:click={() => setLimitDim(d)}>{d}px</button>{/each}
+              </div>
+              <input class="custom-in" type="number" min="16" max="1024" placeholder="custom px" on:change={setCustomDim} />
+              <span class="muted-line">Size: {limits[focusedType]?.dim}px ({limits[focusedType]?.dim}×{limits[focusedType]?.dim}).</span>
+            </div>
+          {/if}
         {/if}
 
         {#if focusedType === 'gif'}
@@ -465,13 +507,6 @@
           <p class="muted-line">More frames = smoother, fewer colors. Richer = fuller color, fewer frames. Both fill your size limit.</p>
           <label class="toggle"><span>Shrink until invisible</span><input type="checkbox" checked={outopts.gif?.mode === 'invisible'} on:change={(e) => setMode(e.target.checked ? 'invisible' : 'cap')} /></label>
           <p class="muted-line">Ignore the size target and make the smallest file with no visible loss.</p>
-          <div class="ctl"><span class="ctl-label">GIF shape</span>
-            <div class="seg three">
-              <button class:on={params.gif_aspect === 'square'} on:click={() => setGifAspect('square')}>Square</button>
-              <button class:on={params.gif_aspect === 'source'} on:click={() => setGifAspect('source')}>Source</button>
-              <button class:on={params.gif_aspect === '16:9'} on:click={() => setGifAspect('16:9')}>16:9</button>
-            </div>
-          </div>
         {:else if focusOut?.meta.animated}
           <div class="ctl"><span class="ctl-label">Motion</span>
             <div class="seg three">
@@ -616,6 +651,9 @@
   .cmp-dl.ghost:hover { color: var(--text); border-color: var(--accent); }
   .custom-in { margin-top: 6px; width: 100%; background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text); padding: 7px 10px; border-radius: var(--radius-sm); font-size: 12px; outline: none; }
   .custom-in:focus { border-color: var(--accent); box-shadow: var(--ring); }
+  .wh-row { display: flex; align-items: center; gap: 8px; }
+  .custom-in.wh { flex: 1; min-width: 0; }
+  .wh-x { color: var(--muted-2); font-weight: 700; }
 
   .working-strip { width: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius); padding: 10px 14px; }
   .dot-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent); animation: spin 0.8s linear infinite; flex: none; }

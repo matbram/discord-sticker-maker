@@ -35,9 +35,10 @@ def build_checklist_for(output_type: str, data: bytes, width: int, height: int,
             "PNG / GIF": fmt in ("PNG", "GIF"),
             "Transparent background": has_alpha,
         }
-    # gif
+    # gif — dimensions are user-chosen (source resolution or an explicit W×H), so there's
+    # no fixed size to assert; show the actual output dims and gate on format + byte limit.
     return {
-        f"Fits {profile['max_dim']}px": max(width, height) <= profile["max_dim"],
+        f"{width}×{height} px": True,
         f"Under {_kb(profile['budget']) // 1024} MB": size <= profile["hard_limit"],
         "GIF format": fmt == "GIF",
     }

@@ -108,8 +108,14 @@ class OutputSpec(BaseModel):
     # User-set size limit (bytes) and output dimension (px); fall back to the profile.
     max_bytes: Optional[int] = Field(None, ge=10 * 1024, le=64 * 1024 * 1024)
     max_dim: Optional[int] = Field(None, ge=16, le=1024)
+    # GIF only: exact output dimensions. When both are set the GIF is cropped to exactly
+    # width×height (aspect = width:height). When neither is set the GIF keeps the source's
+    # own resolution (the "None"/Source option) — the byte budget is then the only thing
+    # that may shrink it. ``max_dim``+``aspect`` remain as a back-compat fallback.
+    width: Optional[int] = Field(None, ge=16, le=1024)
+    height: Optional[int] = Field(None, ge=16, le=1024)
     gif_quality: GifQuality = GifQuality.balanced
-    aspect: GifAspect = GifAspect.source  # GIF-only; sticker/emoji ignore it (always square)
+    aspect: GifAspect = GifAspect.source  # legacy GIF shape; superseded by width/height
     # Per-output framing — falls back to the shared ProcessParams values when unset,
     # so panning/zooming one format never moves the others.
     zoom: Optional[float] = Field(None, ge=0.1, le=5.0)

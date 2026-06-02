@@ -54,6 +54,13 @@ export function resolveAspect(aspect, srcW, srcH) {
   return [Math.max(1, srcW || 1), Math.max(1, srcH || 1)]
 }
 
+// GIF target shape: exact width:height when both are set (custom), else the source's
+// own shape (the "Source"/None option). Mirrors orchestrator's GIF dimension logic.
+export function gifAspect(w, h, srcW, srcH) {
+  if (w && h) return [w, h]
+  return [Math.max(1, srcW || 1), Math.max(1, srcH || 1)]
+}
+
 // Fit an output aspect into a max box, preserving aspect → on-screen stage size.
 export function stageSize(aspectW, aspectH, maxW, maxH) {
   const ar = aspectW / aspectH

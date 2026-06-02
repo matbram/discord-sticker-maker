@@ -4,13 +4,13 @@
   // Click one to focus it in the monitor. Shows the baked asset once ready.
   import { createEventDispatcher } from 'svelte'
   import ProgramMonitor from './ProgramMonitor.svelte'
-  import { resolveAspect } from './cropMath.js'
 
   export let types = []          // [{ id, emoji, label }]
   export let selected = {}
   export let focusedType = ''
   export let params = {}
   export let framing = {}
+  export let gifAR = [1, 1]      // GIF target [w, h] (from App: custom W×H or source shape)
   export let src = ''
   export let isVideo = false
   export let naturalW = 0
@@ -25,7 +25,7 @@
 
   $: shown = types.filter((t) => selected[t.id])
   function aspectFor(id) {
-    if (id === 'gif') return resolveAspect(params.gif_aspect, naturalW, naturalH)
+    if (id === 'gif') return gifAR
     return [1, 1]
   }
   function getOut(id) { return outputs.find((o) => o.type === id) }

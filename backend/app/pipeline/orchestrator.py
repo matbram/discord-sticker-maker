@@ -103,7 +103,6 @@ def process(source: Source, params, emit: EmitFn,
         budget = spec.max_bytes or prof["budget"]
         hard_limit = spec.max_bytes or prof["hard_limit"]
         out_size = spec.max_dim or prof.get("size")            # square side (sticker/emoji)
-        out_max_dim = spec.max_dim or prof.get("max_dim")      # gif longest edge
         eff = params.model_copy(update={
             "priority": spec.priority or params.priority,
             "max_colors": spec.max_colors or params.max_colors,
@@ -114,8 +113,8 @@ def process(source: Source, params, emit: EmitFn,
             "fit_mode": spec.fit_mode if spec.fit_mode is not None else params.fit_mode,
         })
         log.info("audit.output.budget", type=otype, requested_max_bytes=spec.max_bytes,
-                 budget=budget, hard_limit=hard_limit, requested_max_dim=spec.max_dim,
-                 square_size=out_size, gif_max_dim=out_max_dim)
+                 budget=budget, hard_limit=hard_limit, square_size=out_size,
+                 requested_w=spec.width, requested_h=spec.height, requested_max_dim=spec.max_dim)
         fr, de = base_frames, delays
         if animated_src and len(fr) > prof["frame_cap"]:
             fr, de = encode.even_subsample(fr, de, prof["frame_cap"])
@@ -149,9 +148,18 @@ def process(source: Source, params, emit: EmitFn,
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None
             else:
+                # GIF dimensions: exact width×height if both given, else the source's own
+                # resolution ("None"/Source). The byte budget (via Fovea's resolution search)
+                # is the only thing that shrinks it from there. max_dim+aspect: back-compat.
                 sh, sw = fr[0].shape[:2]
-                aw, ah = resolve_aspect(spec.aspect, sw, sh)
-                fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, out_max_dim)
+                if spec.width and spec.height:
+                    aw, ah, long_side = spec.width, spec.height, max(spec.width, spec.height)
+                elif spec.max_dim:
+                    aw, ah = resolve_aspect(spec.aspect, sw, sh)
+                    long_side = spec.max_dim
+                else:
+                    aw, ah, long_side = sw, sh, max(sw, sh)
+                fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, long_side)
                 h, w = fitted[0].shape[:2]
                 src_de = de if is_anim else [100]
                 if is_anim and mode == "cap" and fovea_gif.compare_enabled():
