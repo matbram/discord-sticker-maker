@@ -19,6 +19,7 @@ rayon = "1"             # parallelise per-frame quantization across the byte-tar
 # abi3-py311: build a stable-ABI wheel that runs on any CPython >= 3.11, so the
 # Docker-built wheel doesn't have to match the runtime interpreter's exact build.
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"], optional = true }
+png = "0.18.1"
 
 [features]
 default = []

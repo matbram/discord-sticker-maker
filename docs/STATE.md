@@ -16,6 +16,40 @@
 
 ## 0. Recent updates (latest session)
 
+### Fovea-APNG: perceptual-lossy *truecolor* APNG for the sticker — branch `claude/youthful-bell-Nr3rP`
+
+The animated **sticker** is APNG and used to wash out the same way the GIF did: the old path
+(`encode.py`) crushed every frame into **one shared palette** (the "sepia" the code comments
+call out). APNG's color type is global, so the GIF per-frame-palette fix can't port — but APNG
+supports **truecolor**, so the fix is "no palette at all." A native Rust truecolor APNG encoder
+now keeps **full color + every frame**, manufacturing the needed compression *perceptually*
+(APNG is lossless DEFLATE, no DCT):
+
+- **`fovea-core/src/apng.rs`** (new, `png` 0.18 crate): truecolor RGBA APNG with
+  - **OKLab inter-frame delta** — redraw only the bbox of pixels the eye sees change
+    (`blend=SOURCE` over the bbox, which correctly *erases* when a cut-out subject moves —
+    `OVER` can't); reuses the `oklab` module + the GIF delta idea.
+  - **Perceptual entropy reduction** (the "fool perception" part): edge-aware denoise gated by
+    OKLab ΔE (grain/gradients are sub-JND from their blur → smoothed; edges preserved → kept)
+    and YCoCg **chroma reduction**. A single `strength` knob (radius + edge-override + chroma)
+    scales both; grain is incompressible noise the eye doesn't track, so removing it shrinks
+    the deflated truecolor dramatically and invisibly.
+- **`backend/app/pipeline/fovea_apng.py`** (new) `apng_encode`: a **metric-guided search** —
+  try lossless (strength 0); else bisect strength for the lowest that fits the budget; else a
+  bounded extra blur; else (only pathological full-frame motion) trim frames to honor the hard
+  512KB cap. Honesty report via `default_metric()`. Falls back to legacy `encode_animated` if
+  the native ext is unavailable.
+- **`fovea-core/src/python.rs`** `encode_apng` PyO3 binding; **`orchestrator.py`** sticker
+  branch routes to `apng_encode`. Serving already treats APNG as `image/png` (valid); the
+  checklist already accepts APNG.
+- **Measured (320×320×29f, 512KB):** cut-out grainy → 517 KB, all 29 frames, ΔE 0.008
+  (perceptually lossless, full color); clean → 4.8 KB lossless; realistic non-cutout → 475 KB,
+  all 29 frames, lightly softened; pathological full-frame motion → fits by trimming to 9
+  frames (full color, noted). 6 cargo + 71 pytest green.
+- **Next (Phase 3):** foveation/ROI (keep the subject crisp, blur periphery) to fit dense
+  full-frame clips at *all* frames; a running-sum box blur to speed the heavy-strength path.
+
+
 ### Animated output is a Format choice: GIF (largest perceptually-lossless) | WebP (source res) — branch `claude/youthful-bell-Nr3rP`
 
 WebP proved the format was the ceiling, but some users need an actual `.gif`. So the animated

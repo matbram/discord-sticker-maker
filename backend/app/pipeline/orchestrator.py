@@ -15,7 +15,7 @@ from typing import Callable
 from .. import matte_cache
 from ..models import StickerMeta, profile_for, resolve_aspect
 from ..observability import get_logger, stage
-from . import bg_removal, crop_fit, decode, encode, fovea_gif, validate
+from . import bg_removal, crop_fit, decode, encode, fovea_apng, fovea_gif, validate
 from .ingest import Source
 
 log = get_logger("orchestrator")
@@ -151,7 +151,14 @@ def process(source: Source, params, emit: EmitFn,
                 fitted = crop_fit.fit_square(fr, eff, has_alpha, out_size)
                 w = h = out_size
                 if is_anim and prof["animated_format"] == "APNG":
-                    data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
+                    # Truecolor APNG (full color, every frame) via the native perceptual
+                    # encoder; falls back to the legacy shared-palette path if unavailable.
+                    res_apng = fovea_apng.apng_encode(
+                        fitted, de, budget=budget, deadline=out_deadline, notes=notes)
+                    if res_apng is not None:
+                        data, fmt, n_frames, fps, report = res_apng
+                    else:
+                        data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
                 elif is_anim and prof["animated_format"] == "GIF":
                     # Square emoji: its dimensions are fixed (Discord requires 128×128), so the
                     # encoder must NOT trade resolution for color here.
