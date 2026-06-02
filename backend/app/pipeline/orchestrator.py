@@ -157,24 +157,38 @@ def process(source: Source, params, emit: EmitFn,
                     # quantizes to ~32 colors), so we ship truecolor whenever it's clearly
                     # lossless, and for borderline clips we encode the legacy candidate too and
                     # keep whichever *actually* scores better. None => can't fit / native missing.
+                    log.info("sticker.apng.try", frames=len(fitted), dim=f"{w}x{h}",
+                             budget=budget, remove_bg=params.remove_bg, has_alpha=has_alpha)
                     res_apng = fovea_apng.apng_encode(
                         fitted, de, budget=budget, deadline=out_deadline, notes=notes)
                     if res_apng is not None:
                         data, fmt, n_frames, fps, report = res_apng
+                        log.info("sticker.apng.candidate", fmt=fmt, frames=n_frames, fps=fps,
+                                 bytes=len(data), budget_use=round(len(data) / max(1, budget), 3),
+                                 strength=report.get("strength"), dist=report.get("perceptual_distance"),
+                                 fast_accept=report.get("fast_accept"))
                         if not report.get("fast_accept", False):
                             # Borderline truecolor: compare against legacy, keep the better one.
+                            log.info("sticker.apng.borderline_compare_legacy", truecolor_dist=report.get("perceptual_distance"))
                             try:
                                 ld, lf, ln, lfps = encode.encode_animated(fitted, de, eff)
                                 tdist = report.get("perceptual_distance")
                                 ldist = fovea_apng.apng_distance(fitted, de, ld)
-                                if (tdist is not None and ldist is not None and ldist < tdist):
+                                keep_legacy = (tdist is not None and ldist is not None and ldist < tdist)
+                                log.info("sticker.apng.compare", truecolor_dist=tdist, truecolor_frames=n_frames,
+                                         legacy_dist=ldist, legacy_frames=ln, legacy_bytes=len(ld),
+                                         kept=("legacy" if keep_legacy else "truecolor"))
+                                if keep_legacy:
                                     # Legacy genuinely looks better here (rare) — use it.
                                     data, fmt, n_frames, fps, report = ld, lf, ln, lfps, None
                                     notes[:] = [nt for nt in notes if not nt.startswith("APNG:")]
                             except Exception:  # noqa: BLE001 - comparison is best-effort
-                                pass
+                                log.warning("sticker.apng.compare_failed", exc_info=True)
                     else:
+                        log.warning("sticker.apng.fallback_legacy",
+                                    reason="apng_encode returned None (native missing OR over-budget at max strength)")
                         data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
+                        log.info("sticker.legacy.done", fmt=fmt, frames=n_frames, fps=fps, bytes=len(data))
                         if not params.remove_bg:
                             notes.append("Tip: turn on “Cut out background” — a cut-out subject "
                                          "encodes as full-color truecolor with every frame.")

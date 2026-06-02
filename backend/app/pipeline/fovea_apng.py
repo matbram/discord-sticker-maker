@@ -101,15 +101,24 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
     base = [np.ascontiguousarray(fr) for fr in fitted]
     fps = effective_fps(dl) or 10.0
     dcs = [max(1, int(round(d / 10.0))) for d in dl]  # ms -> centiseconds
+    log.info("apng.start frames=%d dim=%dx%d budget=%d fps=%.2f native=%s",
+             n, w, h, budget, fps, getattr(fovea_native, "__version__", "?"))
 
     def tight() -> bool:
         return deadline is not None and (deadline - time.monotonic()) < 1.0
 
     def enc(strength: float) -> bytes:
         temporal, den, ch, dt = _strength_params(strength)
-        return fovea_native.encode_apng(
+        t0 = time.monotonic()
+        out = fovea_native.encode_apng(
             [f.tobytes() for f in base], w, h, dcs, delta_threshold=dt, alpha_threshold=24,
-            loop_count=0, compression=4, temporal=temporal, denoise=den, chroma_step=ch)["png"]
+            loop_count=0, compression=4, temporal=temporal, denoise=den, chroma_step=ch)
+        png = out["png"]
+        log.info("apng.enc strength=%.3f temporal=%.3f delta=%.3f denoise=%.2f chroma=%d "
+                 "bytes=%d (%dKB) fit=%s changed_frames=%s t=%.1fs", strength, temporal, dt, den, ch,
+                 len(png), len(png) // 1024, len(png) <= budget, out.get("changed_frames"),
+                 time.monotonic() - t0)
+        return png
 
     # 1) Lossless attempt (no transforms). Truly clean/static clips fit here and ship pristine.
     data = enc(0.0)
@@ -122,11 +131,14 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
         cap = 0.85
         top = enc(cap)
         if len(top) > budget:
+            log.warning("apng.bail_legacy reason=over_budget_at_cap cap_bytes=%d budget=%d",
+                        len(top), budget)
             return None
         # Bisect (0, CAP] for the lowest (highest-fidelity) strength that fits.
         lo, hi, best = 0.0, cap, (top, cap)
         for _ in range(6):
             if tight():
+                log.info("apng.bisect_stop reason=deadline")
                 break
             mid = (lo + hi) / 2.0
             d = enc(mid)
@@ -136,6 +148,7 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
             else:
                 lo = mid
         data, used = best
+        log.info("apng.search_done strength=%.3f bytes=%d", used, len(data))
 
     # 3) Score the truecolor candidate. We DON'T hard-reject on a fixed threshold anymore —
     #    keeping all frames + full color is almost always better than the legacy palette path
@@ -154,13 +167,15 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
             frames_from_list([np.ascontiguousarray(f) for f in base], dl),
             frames_from_list(frs, dl[: len(frs)])).distance
     except Exception:  # noqa: BLE001 - report is best-effort
-        pass
+        log.warning("apng.score_failed", exc_info=True)
     # <= accept: all-frames full-color truecolor is clearly better than frame-dropped palette,
     # ship it now (skip the costly legacy compare). Between accept and sanity: borderline, let
     # the orchestrator compare to legacy. > sanity: too soft even for all-frames truecolor.
     accept = float(os.getenv("FOVEA_APNG_ACCEPT", "0.06"))
     sanity = float(os.getenv("FOVEA_APNG_SANITY", "0.18"))
+    log.info("apng.score dist=%s accept=%.3f sanity=%.3f", dist, accept, sanity)
     if dist is not None and dist > sanity:
+        log.warning("apng.bail_legacy reason=too_soft dist=%.4f > sanity=%.3f", dist, sanity)
         return None
     fast_accept = dist is None or dist <= accept
 
