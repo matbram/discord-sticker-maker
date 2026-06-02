@@ -22,9 +22,6 @@ log = get_logger("orchestrator")
 
 EmitFn = Callable[..., None]
 MATTING_MAX_SIDE = 512   # matte at <=512 for memory/speed
-GIF_LOSSLESS_MAX = 512   # cap the GIF's longest side here so the resolution-for-color descent
-                         #   can reach a perceptually-lossless palette (GIF can't be lossless at
-                         #   source res in a small budget; WebP keeps source res instead).
 # Working/cached frames are capped to this longest side — and it's the ceiling for a GIF's
 # "Source" dimensions, so it must be >= common source sizes (a 720x1280 phone clip needs
 # 1280, not the old 640 which halved it to 360x640). Env-tunable: raise for crisper
@@ -188,12 +185,19 @@ def process(source: Source, params, emit: EmitFn,
                     else:
                         data, fmt = encode.encode_static(fitted[0], eff)
                         n_frames, fps = 1, None
-                else:  # gif — largest perceptually-lossless GIF
+                else:  # gif — largest perceptually-lossless GIF, sized to the byte budget
+                    # A lossless GIF holds ~1 bit/pixel of real detail (LZW on a per-frame
+                    # palette), so the largest losslessly-encodable longest side scales with
+                    # sqrt(budget / frames). Start there (<= source) and let the descent refine
+                    # to true losslessness. The upshot the user feels: a BIGGER file-size limit
+                    # yields a BIGGER GIF, up to the source resolution (~8MB for 720x1280x29).
+                    n_est = max(1, len(fr))
+                    ar = max(sw, sh) / max(1, min(sw, sh))
+                    cap = max(128, int(round((budget * 8.0 / n_est * ar) ** 0.5)))  # ~1 bit/px
                     if spec.width and spec.height:
-                        aw, ah = spec.width, spec.height
-                        long_side = min(max(spec.width, spec.height), GIF_LOSSLESS_MAX)
+                        aw, ah, long_side = spec.width, spec.height, min(max(spec.width, spec.height), cap)
                     else:
-                        aw, ah, long_side = sw, sh, min(max(sw, sh), GIF_LOSSLESS_MAX)
+                        aw, ah, long_side = sw, sh, min(max(sw, sh), cap)
                     fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, long_side)
                     h, w = fitted[0].shape[:2]
                     if is_anim:

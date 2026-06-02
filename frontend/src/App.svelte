@@ -508,7 +508,7 @@
                 {/if}
               </div>
             {:else}
-              <p class="muted-line">Largest <b>perceptually-lossless</b> GIF — keeps every frame and your aspect ratio, auto-sized so the colors stay clean within your file size. (A full-color GIF can't stay lossless at source resolution in a small file — pick <b>WebP</b> for full resolution.)</p>
+              <p class="muted-line">Largest <b>perceptually-lossless</b> GIF — every frame, your aspect ratio, auto-sized so colors stay clean. <b>A bigger file-size limit makes a bigger GIF</b> (full {srcCap[0] ? `${srcCap[0]}×${srcCap[1]}` : 'source'} needs ~8&nbsp;MB — GIF holds ~1 bit/pixel). For full source size in a small file, switch to <b>WebP</b>.</p>
             {/if}
           {:else}
             <div class="ctl"><span class="ctl-label">Dimensions</span>
