@@ -22,6 +22,9 @@ log = get_logger("orchestrator")
 
 EmitFn = Callable[..., None]
 MATTING_MAX_SIDE = 512   # matte at <=512 for memory/speed
+GIF_LOSSLESS_MAX = 512   # cap the GIF's longest side here so the resolution-for-color descent
+                         #   can reach a perceptually-lossless palette (GIF can't be lossless at
+                         #   source res in a small budget; WebP keeps source res instead).
 # Working/cached frames are capped to this longest side — and it's the ceiling for a GIF's
 # "Source" dimensions, so it must be >= common source sizes (a 720x1280 phone clip needs
 # 1280, not the old 640 which halved it to 360x640). Env-tunable: raise for crisper
@@ -163,27 +166,44 @@ def process(source: Source, params, emit: EmitFn,
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None
             else:
-                # The animated "GIF" output is emitted as animated WebP: GIF/LZW can't hold
-                # color for a full-color clip at these pixel counts (0.157 bits/px => ~2 colors),
-                # but WebP's DCT + inter-frame prediction keep rich color at the SOURCE
-                # resolution and full frame rate within the same budget. Dimensions keep the
-                # source aspect ratio: Source (default) = the source's own size; Custom W×H =
-                # exact dims. WebP holds color at source res, so no resolution-for-color descent.
+                # The animated output, keeping the SOURCE aspect ratio. Two formats:
+                #   * WebP (anim_format="webp"): VP8 holds rich color at the SOURCE resolution
+                #     (or an exact Custom W×H) within budget — perceptually lossless, all frames.
+                #   * GIF  (default): GIF/LZW can't be lossless at source res in a small budget
+                #     (0.157 bits/px => ~2 colors), so we emit the LARGEST perceptually-lossless
+                #     GIF — cap the longest side, then the resolution-for-color descent finds the
+                #     biggest palette-rich size, keeping all frames.
                 sh, sw = fr[0].shape[:2]
-                if spec.width and spec.height:
-                    aw, ah, long_side = spec.width, spec.height, max(spec.width, spec.height)
-                elif spec.max_dim:                       # back-compat longest-edge
-                    aw, ah = resolve_aspect(spec.aspect, sw, sh); long_side = spec.max_dim
-                else:                                     # Source / Auto -> source resolution
-                    aw, ah, long_side = sw, sh, max(sw, sh)
-                fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, long_side)
-                h, w = fitted[0].shape[:2]
-                if is_anim:
-                    data, fmt, n_frames, fps, report = fovea_gif.webp_encode(
-                        fitted, de, budget=budget, deadline=out_deadline, notes=notes)
-                else:
-                    data, fmt = encode.encode_static(fitted[0], eff)
-                    n_frames, fps = 1, None
+                anim_fmt = _v(spec.anim_format)
+                if anim_fmt == "webp":
+                    if spec.width and spec.height:
+                        aw, ah, long_side = spec.width, spec.height, max(spec.width, spec.height)
+                    else:
+                        aw, ah, long_side = sw, sh, max(sw, sh)
+                    fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, long_side)
+                    h, w = fitted[0].shape[:2]
+                    if is_anim:
+                        data, fmt, n_frames, fps, report = fovea_gif.webp_encode(
+                            fitted, de, budget=budget, deadline=out_deadline, notes=notes)
+                    else:
+                        data, fmt = encode.encode_static(fitted[0], eff)
+                        n_frames, fps = 1, None
+                else:  # gif — largest perceptually-lossless GIF
+                    if spec.width and spec.height:
+                        aw, ah = spec.width, spec.height
+                        long_side = min(max(spec.width, spec.height), GIF_LOSSLESS_MAX)
+                    else:
+                        aw, ah, long_side = sw, sh, min(max(sw, sh), GIF_LOSSLESS_MAX)
+                    fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, long_side)
+                    h, w = fitted[0].shape[:2]
+                    if is_anim:
+                        data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
+                            fitted, de, budget=budget, max_colors=eff.max_colors,
+                            fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
+                            mode=mode, deadline=out_deadline, notes=notes, allow_descent=True)
+                    else:
+                        data, fmt = encode.encode_static(fitted[0], eff)
+                        n_frames, fps = 1, None
 
         # Report the animated output's REAL dimensions (the encoder may shrink to fit the
         # budget, keeping the source aspect): read GIF from its header, WebP from the report.

@@ -299,7 +299,7 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
         # palette suddenly fits far more real color. Shrink ONLY until no longer washed (the
         # highest such resolution), KEEPING the frames, and report the new size honestly.
         data, n, fps, colors, report = chosen
-        if allow_descent and mode != "invisible" and priority != "smooth" and not _rich(colors, report):
+        if allow_descent and mode != "invisible" and not _rich(colors, report):
             import numpy as _np
             from PIL import Image as _Image
 

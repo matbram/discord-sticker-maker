@@ -116,6 +116,7 @@ class OutputSpec(BaseModel):
     width: Optional[int] = Field(None, ge=16, le=1024)
     height: Optional[int] = Field(None, ge=16, le=1024)
     dim_mode: str = "auto"  # "auto" | "source" (GIF only; width/height override)
+    anim_format: str = "gif"  # animated output container: "gif" (largest lossless) | "webp" (source res)
     gif_quality: GifQuality = GifQuality.balanced
     aspect: GifAspect = GifAspect.source  # legacy GIF shape; superseded by width/height
     # Per-output framing — falls back to the shared ProcessParams values when unset,

@@ -16,7 +16,24 @@
 
 ## 0. Recent updates (latest session)
 
-### The animated "GIF" output is now animated WebP — breaks the format ceiling — branch `claude/youthful-bell-Nr3rP`
+### Animated output is a Format choice: GIF (largest perceptually-lossless) | WebP (source res) — branch `claude/youthful-bell-Nr3rP`
+
+WebP proved the format was the ceiling, but some users need an actual `.gif`. So the animated
+output is now a **Format** toggle:
+- **GIF (default)**: the *largest perceptually-lossless GIF*. GIF can't be lossless at source
+  res in a small budget (0.157 bits/px), so the longest side is capped (`GIF_LOSSLESS_MAX`=512)
+  and the resolution-for-color descent finds the biggest palette-rich size — **all frames,
+  source aspect**. The user's 720×1280 clip → 288×512, 96 colors, ΔE 0.0036 (perceptually
+  lossless), 29 frames, 95% of 512 KB. The descent now runs in "More frames" too (so a lossless
+  GIF can keep every frame), gated only on `allow_descent`.
+- **WebP**: full **source resolution** (or Custom W×H) via `webp_encode` — VP8 holds rich color
+  at 720×1280 (ΔE 0.005, lossless). For users who can use WebP and want max resolution.
+
+`OutputSpec.anim_format` ("gif"|"webp") selects it; the orchestrator routes accordingly.
+Frontend: a **Format: GIF | WebP** chip in the GIF panel; Dimensions (Source | Custom W×H)
+shows only for WebP. Serving handles `image/webp`. Sticker stays APNG, emoji GIF.
+
+### (superseded) The animated "GIF" output is now animated WebP — branch `claude/youthful-bell-Nr3rP`
 
 **The real ceiling was GIF itself.** A full-color 720×1280 × 29-frame clip in 512 KB is
 **0.157 bits/pixel**. GIF/LZW has no DCT, no inter-frame prediction, and only ~2:1 entropy

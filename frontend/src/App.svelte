@@ -56,12 +56,12 @@
   // Mirror of backend orchestrator WORK_MAX_SIDE: source frames are capped to this longest
   // side, so "Source" can't exceed it. Keep in sync with FOVEA_WORK_MAX_SIDE on the backend.
   const WORK_MAX_SIDE = 1280
-  // GIF sizing (emitted as animated WebP, which holds rich color at full resolution):
-  // 'source' keeps the source's own size (default); 'custom' uses an exact width×height.
-  // Both keep the source aspect ratio. Sticker/emoji are square, so they keep a side (`dim`).
+  // Animated output. format 'gif' = largest perceptually-lossless GIF (auto-sized, all frames,
+  // source aspect); format 'webp' = full source resolution (or Custom W×H), modern codec.
+  // WebP sizing: mode 'source' (default) or 'custom' (exact W×H). Sticker/emoji are square (`dim`).
   function defaultLimits() {
     return {
-      gif: { bytes: 5242880, mode: 'source', width: null, height: null },
+      gif: { bytes: 5242880, format: 'gif', mode: 'source', width: null, height: null },
       sticker: { bytes: 524288, dim: 320 },
       emoji: { bytes: 262144, dim: 128 }
     }
@@ -167,10 +167,11 @@
     const lim = (t) => {
       if (t === 'gif') {
         const g = limits.gif
-        // Custom -> exact W×H; otherwise (Source, default) send only the budget -> source res.
-        return (g.mode === 'custom' && g.width && g.height)
-          ? { max_bytes: g.bytes, width: g.width, height: g.height }
-          : { max_bytes: g.bytes }
+        const base = { max_bytes: g.bytes, anim_format: g.format }
+        // WebP Custom -> exact W×H; else (GIF, or WebP Source) just the budget + format.
+        return (g.format === 'webp' && g.mode === 'custom' && g.width && g.height)
+          ? { ...base, width: g.width, height: g.height }
+          : base
       }
       return { max_bytes: limits[t].bytes, max_dim: limits[t].dim }
     }
@@ -265,8 +266,8 @@
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setLimitBytes(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], bytes: v } }; persistLimits(); scheduleRegen() }
   function setLimitDim(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], dim: v } }; persistLimits(); scheduleRegen() }
-  // GIF sizing modes. Auto (default) lets the encoder pick the size for the richest color;
-  // Source locks the source resolution; Custom uses an exact W×H. All keep the source aspect.
+  function setGifFormat(format) { limits = { ...limits, gif: { ...limits.gif, format } }; persistLimits(); scheduleRegen() }
+  // WebP sizing modes: Source (default) locks the source resolution; Custom uses an exact W×H.
   function setGifMode(mode) {
     const g = { ...limits.gif, mode }
     if (mode === 'custom' && !(g.width && g.height)) { g.width = sourceW || 320; g.height = sourceH || 320 }
@@ -315,9 +316,10 @@
   $: userOutputs = outputs.filter((o) => !String(o.type).includes('__cmp'))
 
   $: fr = framing[focusedType] || framing.gif
+  $: gifFormat = limits.gif?.format || 'gif'
   $: gifMode = limits.gif?.mode || 'source'
-  $: gifCustom = gifMode === 'custom' && !!(limits.gif?.width && limits.gif?.height)
-  $: gifAR = gifAspect(gifCustom ? limits.gif.width : null, gifCustom ? limits.gif.height : null, sourceW, sourceH)
+  $: gifWebpCustom = gifFormat === 'webp' && gifMode === 'custom' && !!(limits.gif?.width && limits.gif?.height)
+  $: gifAR = gifAspect(gifWebpCustom ? limits.gif.width : null, gifWebpCustom ? limits.gif.height : null, sourceW, sourceH)
   $: focusAspect = focusedType === 'gif' ? gifAR : [1, 1]
   // Source frames are capped to WORK_MAX_SIDE, so "Source" yields this, not the raw file size.
   $: srcCap = (sourceW && sourceH)
@@ -480,24 +482,34 @@
             <span class="muted-line">Target: {fmtBytes(limits[focusedType]?.bytes)}</span>
           </div>
           {#if focusedType === 'gif'}
-            <div class="ctl"><span class="ctl-label">Dimensions</span>
+            <div class="ctl"><span class="ctl-label">Format</span>
               <div class="chips">
-                <button class="chip" class:on={gifMode !== 'custom'} on:click={() => setGifMode('source')}>Source</button>
-                <button class="chip" class:on={gifMode === 'custom'} on:click={() => setGifMode('custom')}>Custom W×H</button>
+                <button class="chip" class:on={gifFormat === 'gif'} on:click={() => setGifFormat('gif')}>GIF</button>
+                <button class="chip" class:on={gifFormat === 'webp'} on:click={() => setGifFormat('webp')}>WebP</button>
               </div>
-              {#if gifMode === 'custom'}
-                <div class="wh-row">
-                  <input class="custom-in wh" type="number" min="16" max="1024" placeholder="width"
-                         value={limits.gif.width ?? ''} on:change={setGifW} />
-                  <span class="wh-x">×</span>
-                  <input class="custom-in wh" type="number" min="16" max="1024" placeholder="height"
-                         value={limits.gif.height ?? ''} on:change={setGifH} />
-                </div>
-                <span class="muted-line">Exactly {limits.gif.width}×{limits.gif.height} px, full color (animated WebP).</span>
-              {:else}
-                <span class="muted-line">Your source size{srcCap[0] ? ` (${srcCap[0]}×${srcCap[1]})` : ''}, full color &amp; frame rate — encoded as animated WebP (plays in Discord like a GIF).</span>
-              {/if}
             </div>
+            {#if gifFormat === 'webp'}
+              <div class="ctl"><span class="ctl-label">Dimensions</span>
+                <div class="chips">
+                  <button class="chip" class:on={gifMode !== 'custom'} on:click={() => setGifMode('source')}>Source</button>
+                  <button class="chip" class:on={gifMode === 'custom'} on:click={() => setGifMode('custom')}>Custom W×H</button>
+                </div>
+                {#if gifMode === 'custom'}
+                  <div class="wh-row">
+                    <input class="custom-in wh" type="number" min="16" max="1024" placeholder="width"
+                           value={limits.gif.width ?? ''} on:change={setGifW} />
+                    <span class="wh-x">×</span>
+                    <input class="custom-in wh" type="number" min="16" max="1024" placeholder="height"
+                           value={limits.gif.height ?? ''} on:change={setGifH} />
+                  </div>
+                  <span class="muted-line">Exactly {limits.gif.width}×{limits.gif.height} px, full color (animated WebP).</span>
+                {:else}
+                  <span class="muted-line">Your source size{srcCap[0] ? ` (${srcCap[0]}×${srcCap[1]})` : ''}, full color &amp; frame rate — animated WebP (plays in Discord like a GIF).</span>
+                {/if}
+              </div>
+            {:else}
+              <p class="muted-line">Largest <b>perceptually-lossless</b> GIF — keeps every frame and your aspect ratio, auto-sized so the colors stay clean within your file size. (A full-color GIF can't stay lossless at source resolution in a small file — pick <b>WebP</b> for full resolution.)</p>
+            {/if}
           {:else}
             <div class="ctl"><span class="ctl-label">Dimensions</span>
               <div class="chips">
