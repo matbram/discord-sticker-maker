@@ -6,6 +6,18 @@ RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
+# ---------- build the native encoder wheel (Rust + maturin) ----------
+# fovea_native is the per-frame-local-palette + perceptual-delta GIF engine. It is
+# built as an abi3 wheel here and pip-installed into the runtime below.
+FROM rust:1-slim-bookworm AS rustbuild
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-dev python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip3 install --no-cache-dir --break-system-packages "maturin>=1,<2"
+WORKDIR /build
+COPY fovea-core ./fovea-core
+RUN cd fovea-core && maturin build --release -i python3 --out /wheels
+
 # ---------- backend runtime ----------
 FROM python:3.11-slim AS runtime
 
@@ -27,6 +39,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY backend/requirements.txt ./
 RUN pip install -r requirements.txt
+
+# Native Fovea encoder (abi3 wheel from the rustbuild stage). Optional at runtime:
+# FoveaNativeEngine falls back to the ffmpeg engines if this import ever fails, so a
+# build hiccup here can never break the app.
+COPY --from=rustbuild /wheels /tmp/wheels
+RUN pip install /tmp/wheels/*.whl && rm -rf /tmp/wheels
 
 COPY backend/app ./app
 # Fovea encoder package (the backend GIF path imports `encoder`). Its deps

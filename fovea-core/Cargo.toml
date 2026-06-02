@@ -1,0 +1,30 @@
+[package]
+name = "fovea_native"
+version = "0.1.0"
+edition = "2021"
+description = "Fovea native GIF encoder: per-frame (and per-region) local palettes, perceptual OKLab delta, temporally-stable assembly."
+license = "MIT"
+
+[lib]
+name = "fovea_native"
+# cdylib -> the Python extension module (built by maturin);
+# rlib   -> so `cargo test` can build the pure-Rust test harness.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gif = "0.13"            # GIF assembly: local color tables + transparency + disposal + LZW
+imagequant = "4"        # SOTA perceptual quantization (libimagequant / the pngquant engine)
+rgb = "0.8"             # zero-copy &[u8] -> &[RGBA8] view for imagequant
+# abi3-py311: build a stable-ABI wheel that runs on any CPython >= 3.11, so the
+# Docker-built wheel doesn't have to match the runtime interpreter's exact build.
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"], optional = true }
+
+[features]
+default = []
+# `python` pulls in PyO3 for the extension module; cargo test runs without it.
+python = ["dep:pyo3"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

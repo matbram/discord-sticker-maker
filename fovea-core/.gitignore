@@ -1,0 +1,3 @@
+/target
+*.whl
+# Cargo.lock IS committed (pinned deps -> reproducible Docker builds).

@@ -289,7 +289,87 @@ class GifsicleLossyEngine(Engine):
         return EngineOutput(out_path, size, base_out.argv + argv, self.name, state)
 
 
-ALL_ENGINES: tuple[type[Engine], ...] = (FfmpegPaletteEngine, GifskiEngine, GifsicleLossyEngine)
+def _native_dither(name: str | None) -> float:
+    """Map the string dither lever to imagequant's 0..1 dithering level."""
+    return {"none": 0.0, "bayer": 0.5}.get(name or "", 1.0)
+
+
+def _rgba_frames(ctx: RenderContext) -> list[bytes]:
+    """Decode the context's PNG frames to raw RGBA bytes, cached on the context so
+    the search's many same-frame probes don't re-decode."""
+    cache = getattr(ctx, "_fovea_rgba", None)
+    if cache is None:
+        cache = [Image.open(p).convert("RGBA").tobytes() for p in ctx.frame_paths]
+        ctx._fovea_rgba = cache  # type: ignore[attr-defined]
+    return cache
+
+
+class FoveaNativeEngine(Engine):
+    """Native Rust encoder: per-frame local palettes + perceptual OKLab delta.
+
+    This is the engine that dissolves the frames-vs-color frontier. Where the
+    ffmpeg engine forces one global ≤256-color palette on every frame (the washout
+    cause), this gives *each frame its own* perceptually-chosen palette (so the file
+    can hold thousands of colors) and, on opaque clips, reuses unchanged pixels via
+    transparency so static content costs ~0 bytes — reclaimed budget that funds both
+    rich color and a full frame count. Falls back cleanly to the ffmpeg engines when
+    the ``fovea_native`` extension isn't built.
+    """
+
+    name = "fovea-native"
+    primary_lever = LeverKind.COLORS
+
+    @classmethod
+    def available(cls) -> bool:
+        try:
+            import fovea_native  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    def supports_alpha(self) -> bool:
+        return True
+
+    def default_state(self) -> LeverState:
+        return LeverState(colors=256, dither="sierra2_4a")
+
+    def primary_values(self) -> tuple:
+        # Same per-frame color ladder; "colors" is now a *per-frame* budget.
+        return FFMPEG_COLORS
+
+    def state_for_primary(self, idx: int, base: LeverState | None = None) -> LeverState:
+        base = base or self.default_state()
+        return base.with_(colors=FFMPEG_COLORS[idx])
+
+    def secondary_neighbors(self, state: LeverState) -> list[LeverState]:
+        # A no-dither neighbor trades a little banding for a smaller file.
+        return [state.with_(dither="none")] if state.dither != "none" else []
+
+    def encode(self, ctx: RenderContext, state: LeverState, out_path: str) -> EngineOutput:
+        import fovea_native
+
+        frames = _rgba_frames(ctx)
+        colors = int(state.colors or 256)
+        dith = _native_dither(state.dither)
+        delta = float(os.getenv("FOVEA_DELTA_E", "0.02"))  # OKLab ΔE; ~1 JND
+        speed = int(os.getenv("FOVEA_NATIVE_SPEED", "4"))
+        res = fovea_native.encode(
+            frames, ctx.width, ctx.height, list(ctx.delays_cs),
+            max_colors=colors, dithering=dith, delta_threshold=delta,
+            speed=speed, loop_count=0,
+        )
+        with open(out_path, "wb") as fh:
+            fh.write(res["gif"])
+        argv = [[
+            "fovea-native", f"colors={colors}", f"dither={state.dither}",
+            f"delta_e={delta}", f"mode={res['mode']}", f"distinct={res['distinct_colors']}",
+        ]]
+        return EngineOutput(out_path, len(res["gif"]), argv, self.name, state)
+
+
+ALL_ENGINES: tuple[type[Engine], ...] = (
+    FoveaNativeEngine, FfmpegPaletteEngine, GifskiEngine, GifsicleLossyEngine,
+)
 
 
 def available_engines(names: list[str] | None = None) -> list[Engine]:

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fovea-native"
+version = "0.1.0"
+description = "Fovea native GIF encoder (per-frame local palettes + perceptual OKLab delta)."
+requires-python = ">=3.11"
+classifiers = ["Programming Language :: Rust"]
+
+[tool.maturin]
+# Build the PyO3 extension with the `python` feature; the module is `fovea_native`.
+features = ["python"]
+module-name = "fovea_native"

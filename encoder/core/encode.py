@@ -47,9 +47,11 @@ def _select_engine(frames: Frames, names: list[str] | None) -> tuple[Engine, lis
         )
     warnings: list[str] = []
     alpha = _has_alpha(frames)
+    # Prefer the native engine (per-frame local palettes + perceptual delta) when
+    # built; the ffmpeg-based engines remain as automatic fallbacks/baselines.
     preference = (
-        ["ffmpeg-palette", "gifsicle-lossy", "gifski"] if alpha
-        else ["ffmpeg-palette", "gifski", "gifsicle-lossy"]
+        ["fovea-native", "ffmpeg-palette", "gifsicle-lossy", "gifski"] if alpha
+        else ["fovea-native", "ffmpeg-palette", "gifski", "gifsicle-lossy"]
     )
     for name in preference:
         if name in engines:
