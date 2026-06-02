@@ -70,6 +70,7 @@ dependencies = [
  "gif",
  "imagequant",
  "pyo3",
+ "rayon",
  "rgb",
 ]
 

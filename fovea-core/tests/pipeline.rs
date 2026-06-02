@@ -2,7 +2,7 @@
 //! cares about: every frame kept, the global-256-color ceiling broken, and static
 //! content reused (near-zero cost) on opaque clips.
 
-use fovea_native::{encode_frames, EncodeOpts};
+use fovea_native::{encode_frames, encode_search, EncodeOpts, SearchOpts};
 
 const W: u32 = 64;
 const H: u32 = 64;
@@ -161,6 +161,56 @@ fn transparency_forces_full_mode_and_is_correct() {
     };
     let out = encode_frames(&frames, &delays, &opts).unwrap();
     assert_eq!(out.mode, "full", "alpha matte must fall back to full frames");
+    assert_eq!(count_gif_frames(&out.gif), frames.len());
+}
+
+fn search_opts(target: u64, delta: f32) -> SearchOpts {
+    SearchOpts {
+        width: W,
+        height: H,
+        target_bytes: target,
+        max_colors: 256,
+        min_colors: 2,
+        dithering: 1.0,
+        quality_min: 0,
+        quality_max: 100,
+        speed: 6,
+        delta_threshold: delta,
+        loop_count: 0,
+    }
+}
+
+#[test]
+fn search_always_fits_the_target_and_keeps_all_frames() {
+    // 16 rich full-motion frames: at 256 colors this busts a tight target, so the
+    // search must drop the per-frame color budget until it fits — but keep every frame.
+    let frames: Vec<Vec<u8>> = (0..16).map(gradient_frame).collect();
+    let delays = vec![10u16; frames.len()];
+
+    let big = encode_frames(
+        &frames,
+        &delays,
+        &EncodeOpts { width: W, height: H, max_colors: 256, ..Default::default() },
+    )
+    .unwrap();
+    let target = (big.gif.len() as u64) / 2; // force a real reduction
+
+    let out = encode_search(&frames, &delays, &search_opts(target, 0.0)).unwrap();
+    assert!(out.under_budget, "search must return a fitting result");
+    assert!(out.gif.len() as u64 <= target, "{} > {}", out.gif.len(), target);
+    assert_eq!(count_gif_frames(&out.gif), frames.len(), "all frames kept");
+    assert!(out.colors >= 2 && out.colors <= 256);
+}
+
+#[test]
+fn search_returns_smallest_when_nothing_fits() {
+    // An impossibly tiny target: the search must still return *something* (the minimal
+    // encode), flagged as not under budget, rather than spinning or failing.
+    let frames: Vec<Vec<u8>> = (0..8).map(gradient_frame).collect();
+    let delays = vec![10u16; frames.len()];
+    let out = encode_search(&frames, &delays, &search_opts(50, 0.0)).unwrap();
+    assert!(!out.under_budget);
+    assert_eq!(out.colors, 2, "fell back to the minimum color budget");
     assert_eq!(count_gif_frames(&out.gif), frames.len());
 }
 

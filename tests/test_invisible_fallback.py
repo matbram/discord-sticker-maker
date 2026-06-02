@@ -18,6 +18,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 fg = pytest.importorskip("app.pipeline.fovea_gif")
 
 
+@pytest.fixture(autouse=True)
+def _force_legacy_bridge(monkeypatch):
+    # The invisible->cap fallthrough under test is the *legacy* bridge path; the native
+    # engine handles invisible inside encode(), so disable native here to exercise it.
+    monkeypatch.setattr(fg, "_native_available", lambda: False)
+
+
 def _frames(n=8, hw=32):
     return [np.zeros((hw, hw, 4), np.uint8) for _ in range(n)], [80] * n
 

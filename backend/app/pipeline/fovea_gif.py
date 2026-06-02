@@ -221,11 +221,22 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
     per_encode = float(os.getenv("FOVEA_BUDGET_SECONDS", "12"))
     attempts = int(os.getenv("FOVEA_MAX_ATTEMPTS", "12"))
 
-    # Invisible: aim for the smallest perceptually-lossless GIF, every frame kept.
-    # If the clip CAN'T be made lossless under the ceiling, fall THROUGH to cap-mode
-    # budget-fill: the encoder never trims frames, so a stuck-low-palette invisible
-    # result is washed out and worse than the default. Falling back guarantees
-    # invisible is never worse than cap (see tests/test_invisible_fallback.py).
+    # NATIVE PATH: the in-Rust byte-target search keeps every frame and guarantees a
+    # <= budget result (it lowers the per-frame color budget, then resolution only if
+    # truly forced) and shrinks for invisible mode internally. So we trust it: ONE
+    # encode, no frames-vs-color dance, no fit-rescue. `priority` is a no-op here — the
+    # tradeoff it managed no longer exists. The legacy ffmpeg path below keeps the dance.
+    if _native_available():
+        secs = max(1.0, _seconds_left(deadline, per_encode * 2))
+        data, fps, colors, report = _encode_once(fitted, delays, budget, secs, attempts, mode=mode)
+        log.info("fovea.native mode=%s frames=%d colors=%s bytes=%d usage=%.2f under=%s",
+                 mode, total, colors, len(data), (len(data) / budget) if budget else 1.0,
+                 report.get("under_target"))
+        return data, total, fps, colors, report
+
+    # ---- LEGACY ffmpeg fallback: invisible handling + the 3-phase frames-vs-color dance.
+    # Invisible: smallest perceptually-lossless GIF; if a clip can't be made lossless under
+    # the ceiling, fall THROUGH to cap budget-fill (never worse than cap).
     if mode == "invisible":
         data, fps, colors, report = _encode_once(
             fitted, delays, budget, max(1.0, _seconds_left(deadline, per_encode)), attempts,
@@ -237,14 +248,7 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
         log.info("fovea.invisible_fallback frames=%d colors=%s bytes=%d lossless=False; "
                  "using cap budget-fill", total, colors, len(data))
 
-    # Native engine: per-frame local palettes deliver rich color with EVERY frame kept,
-    # and a now-trustworthy color-aware metric drives the search — so the color-seeking
-    # frame-trim (2a) and frame-fill (3) below are disabled (floor=0 + the `native`
-    # flag). They only existed because one global palette couldn't do both; on this path
-    # they would just throw frames away. The mandatory fit-rescue (2b) still runs so the
-    # hard byte cap is always met. The legacy ffmpeg fallback keeps the full dance.
-    native = _native_available()
-    floor = 0 if native else _color_floor_for(priority)
+    floor = _color_floor_for(priority)
     # fps floor: never trim into a slideshow. 'sharp' may trim further for richer color
     # than the smoother modes, but both stay above a watchable frame rate. Duration is
     # preserved across subsampling, so frames / duration == output fps.
@@ -303,9 +307,7 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
         data, n, fps, colors, usage, report = chosen
     # 3. Frame-fill: top off the budget by adding frames back at the chosen palette+dither
     #    (more frames = smoother, no extra washout). Never leave budget on the table.
-    #    Skipped on the native path: it keeps every frame already (n == total unless the
-    #    fit-rescue had to trim, in which case re-adding frames would just re-overshoot).
-    if (not native and priority != "smooth" and usage < target and n < total and colors
+    if (priority != "smooth" and usage < target and n < total and colors
             and (deadline is None or (deadline - time.monotonic()) > 1.0)):
         filled = _fill_frames_at_colors(fitted, delays, budget, n, len(data), int(colors),
                                         report.get("dither"))

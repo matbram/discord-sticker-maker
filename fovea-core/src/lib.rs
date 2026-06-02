@@ -8,7 +8,7 @@
 pub mod encode;
 pub mod oklab;
 
-pub use encode::{encode_frames, EncodeOpts, EncodeOut};
+pub use encode::{encode_frames, encode_search, EncodeOpts, EncodeOut, SearchOpts, SearchOut};
 
 #[cfg(feature = "python")]
 mod python;

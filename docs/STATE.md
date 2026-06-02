@@ -6,7 +6,9 @@
 > **dissolves the frames-vs-color "ceiling"** (§4.2/§4.3) — wired it behind the
 > Engine ABC, **activated the M0 corpus**, then (Phase 2) made the metric
 > **trustworthy on color** (banding-aware OKLab term) and **retired the bridge's
-> frame-trim bandaid** on the native path. Branch `claude/youthful-bell-Nr3rP`. See §0.
+> frame-trim bandaid** — then fixed a live **over-budget regression** at 512px by moving
+> the byte-target search into ONE Rust call (it never exceeds the cap and stays fast).
+> Branch `claude/youthful-bell-Nr3rP`. See §0.
 > Companion docs: `docs/fovea-spec.md` (the why), `docs/architecture.md`,
 > `docs/metrics.md`, `docs/bench.md`, `docs/cli.md`, `docs/m2-judge.md` (the learned judge).
 
@@ -91,6 +93,35 @@ on the native path. Both shipped + tested.
   Net: on the native path, `priority` (smooth/balanced/sharp) is now effectively a no-op —
   the tradeoff it managed no longer exists (a product decision for whether to repurpose
   the control). `FOVEA_FORCE_LEGACY_BRIDGE=1` is an escape hatch.
+
+### Production fix — over-budget regression at large sizes (same branch)
+
+First live test (512×288, 72-frame video @ 512KB) exposed a P0 the local tests missed:
+the native engine **shipped 671KB over the 512KB cap**, at only 20 colors, with frames
+trimmed (51) and resolution dropped (410×230). Root cause: the **Python-orchestrated
+search made one slow Rust call per color probe** (re-copying frames, PNG round-trips),
+and the per-encode time budget expired mid-bisection (`stop_reason=budget_seconds`,
+`attempts=2`) → it shipped the best *over*-budget candidate. The metric made it worse:
+`distance()` was **~32s** at full 512px. Fixes:
+
+- **`fovea_native.search` — the whole byte-target search in ONE Rust call**
+  (`encode_search`). Two-stage so it's fast *and* not conservative: a **parallel
+  full-mode bisection** (frames quantized across cores) gives a guaranteed-fitting lower
+  bound, then a **delta bisection climbs upward** (delta is much smaller on real video, so
+  it reaches a far richer palette that still fits). It **runs to completion**, so it can
+  never time out into an over-budget file — and always returns the smallest it can.
+- **Metric ~8× faster** (`encoder/metrics/perceptual.py`): downscale both sides to
+  `FOVEA_METRIC_MAXDIM` (192px) before scoring — banding/structure are low-frequency, so
+  it's lossless to the *ranking* — plus a slicing-based box blur. ~32s → ~4s.
+- **Bridge trusts the native encode** (`fovea_gif.py`): one `_encode_once`, no
+  invisible→cap→fit-rescue triple-encode (the search self-guarantees the fit and shrinks
+  invisible internally). Legacy ffmpeg path keeps the full dance (autouse-fixture-forced in
+  `tests/test_fill_and_fps.py` / `test_invisible_fallback.py`).
+
+Verified end-to-end on a dark/partial-motion 512px clip: **9s cap / 13s invisible, 327KB ≤
+512KB, 256 colors, perceptually lossless, all 72 frames, full 512×288** (was 50s+, 671KB,
+20 colors, 51 frames, 410×230). New Rust tests:
+`search_always_fits_the_target_and_keeps_all_frames`, `search_returns_smallest_when_nothing_fits`.
 
 ---
 

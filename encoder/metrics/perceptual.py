@@ -8,6 +8,8 @@ physical constant — the M0 benchmark table is the instrument used to tune it.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from PIL import Image
 
@@ -18,6 +20,33 @@ from .msssim import msssim_per_frame
 from .temporal import temporal_distance
 
 _LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float64)
+
+# Perceptual scores are low-frequency: a full 512px frame is needless work (MS-SSIM
+# + OKLab banding cost ~30s/score at that size). Downscale both sides to a common
+# small size first — banding and structure survive it — for an ~10x speedup.
+METRIC_MAX_DIM = int(os.getenv("FOVEA_METRIC_MAXDIM", "192"))
+
+
+def _metric_frames(
+    ref: list[np.ndarray], cand: list[np.ndarray], max_dim: int
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Downscale reference and candidate frames to a common small size (from the
+    reference's aspect), so scoring is cheap and the two are directly comparable."""
+    h, w = ref[0].shape[:2]
+    m = max(h, w)
+    s = min(1.0, max_dim / m) if m > 0 else 1.0
+    nh, nw = max(1, round(h * s)), max(1, round(w * s))
+
+    def rs(frames: list[np.ndarray]) -> list[np.ndarray]:
+        out = []
+        for f in frames:
+            im = Image.fromarray(np.asarray(f, dtype=np.uint8)).convert("RGBA")
+            if im.size != (nw, nh):
+                im = im.resize((nw, nh), Image.BILINEAR)
+            out.append(np.asarray(im, dtype=np.uint8))
+        return out
+
+    return rs(ref), rs(cand)
 
 
 def composite_luma_stack(frames: list[np.ndarray]) -> np.ndarray:
@@ -57,8 +86,9 @@ class PerceptualMetric(Metric):
         self.invisible_threshold = invisible_threshold
 
     def distance(self, reference: Frames, candidate: Frames) -> DistanceResult:
-        ref_l = composite_luma_stack(reference.frames)
-        cand_l = composite_luma_stack(candidate.frames)
+        ref_f, cand_f = _metric_frames(reference.frames, candidate.frames, METRIC_MAX_DIM)
+        ref_l = composite_luma_stack(ref_f)
+        cand_l = composite_luma_stack(cand_f)
 
         # All frames are kept, so counts should match; guard defensively.
         n = min(ref_l.shape[0], cand_l.shape[0])
@@ -107,15 +137,16 @@ class ColorAwareMetric(Metric):
         self.invisible_threshold = invisible_threshold
 
     def distance(self, reference: Frames, candidate: Frames) -> DistanceResult:
-        ref_l = composite_luma_stack(reference.frames)
-        cand_l = composite_luma_stack(candidate.frames)
+        ref_f, cand_f = _metric_frames(reference.frames, candidate.frames, METRIC_MAX_DIM)
+        ref_l = composite_luma_stack(ref_f)
+        cand_l = composite_luma_stack(cand_f)
         n = min(ref_l.shape[0], cand_l.shape[0])
         ref_l, cand_l = ref_l[:n], cand_l[:n]
         cand_l = _resize_luma_stack(cand_l, ref_l.shape[1:])
 
         msssim_f = msssim_per_frame(ref_l, cand_l)
         struct = 1.0 - msssim_f                                  # per-frame structural loss
-        band = banding_per_frame(reference.frames, candidate.frames)  # per-frame OKLab ΔE
+        band = banding_per_frame(ref_f, cand_f)                  # per-frame OKLab ΔE (small)
         band = band[:n]
         temporal, _ = temporal_distance(ref_l, cand_l)
 

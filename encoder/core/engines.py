@@ -352,7 +352,7 @@ class FoveaNativeEngine(Engine):
         colors = int(state.colors or 256)
         dith = _native_dither(state.dither)
         delta = float(os.getenv("FOVEA_DELTA_E", "0.02"))  # OKLab ΔE; ~1 JND
-        speed = int(os.getenv("FOVEA_NATIVE_SPEED", "4"))
+        speed = int(os.getenv("FOVEA_NATIVE_SPEED", "5"))
         res = fovea_native.encode(
             frames, ctx.width, ctx.height, list(ctx.delays_cs),
             max_colors=colors, dithering=dith, delta_threshold=delta,
@@ -363,6 +363,33 @@ class FoveaNativeEngine(Engine):
         argv = [[
             "fovea-native", f"colors={colors}", f"dither={state.dither}",
             f"delta_e={delta}", f"mode={res['mode']}", f"distinct={res['distinct_colors']}",
+        ]]
+        return EngineOutput(out_path, len(res["gif"]), argv, self.name, state)
+
+    def search_to_budget(
+        self, ctx: RenderContext, target_bytes: int, out_path: str, *, dither: str = "sierra2_4a",
+    ) -> EngineOutput:
+        """Hit the byte target in ONE Rust call: bisect the per-frame color budget to
+        the largest palette that fits, frames quantized in parallel. Always returns a
+        result (the smallest it can if the target is impossible), so the search can
+        never time out into an over-budget file."""
+        import fovea_native
+
+        frames = _rgba_frames(ctx)
+        dith_level = _native_dither(dither)
+        delta = float(os.getenv("FOVEA_DELTA_E", "0.02"))
+        speed = int(os.getenv("FOVEA_NATIVE_SPEED", "5"))
+        res = fovea_native.search(
+            frames, ctx.width, ctx.height, list(ctx.delays_cs), int(max(1, target_bytes)),
+            max_colors=256, min_colors=2, dithering=dith_level, delta_threshold=delta,
+            speed=speed, loop_count=0,
+        )
+        with open(out_path, "wb") as fh:
+            fh.write(res["gif"])
+        state = LeverState(colors=int(res["colors"]), dither=dither).with_(scale=ctx.scale)
+        argv = [[
+            "fovea-native-search", f"colors={res['colors']}", f"mode={res['mode']}",
+            f"distinct={res['distinct_colors']}", f"under_budget={res['under_budget']}",
         ]]
         return EngineOutput(out_path, len(res["gif"]), argv, self.name, state)
 

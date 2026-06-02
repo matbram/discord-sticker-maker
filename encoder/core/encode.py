@@ -17,7 +17,7 @@ import numpy as np
 from ..metrics import default_metric
 from ..metrics.base import Metric
 from .budget import Budget
-from .engines import Engine, available_engines, prepare_context
+from .engines import Engine, FoveaNativeEngine, available_engines, prepare_context
 from .frames import Frames, InputCaps, frames_from_list, frames_from_source, load_gif, sniff_kind
 from .levers import SCALE_VALUES, LeverState
 from .logging import get_logger
@@ -159,18 +159,28 @@ def encode(
         return out_list
 
     try:
-        outcome = guided_search(
-            primary_n=len(engine.primary_values()),
-            scales=list(SCALE_VALUES),
-            measure=measure,
-            score=score,
-            target_bytes=ceiling,
-            tol=tol,
-            budget=budget,
-            mode=mode,
-            invisible_threshold=metric.invisible_threshold,
-            explore=explore,
-        )
+        if isinstance(engine, FoveaNativeEngine):
+            # Native fast path: the byte-target color search runs in ONE Rust call per
+            # scale (frames quantized in parallel), so it always completes and returns a
+            # <= budget result — no per-probe Python round-trips, no timing out into an
+            # overshoot. Resolution is dropped only if even the minimum palette overflows.
+            outcome = _native_search(
+                engine, list(SCALE_VALUES), ctx_for, score, workdir, budget,
+                ceiling, mode, metric.invisible_threshold,
+            )
+        else:
+            outcome = guided_search(
+                primary_n=len(engine.primary_values()),
+                scales=list(SCALE_VALUES),
+                measure=measure,
+                score=score,
+                target_bytes=ceiling,
+                tol=tol,
+                budget=budget,
+                mode=mode,
+                invisible_threshold=metric.invisible_threshold,
+                explore=explore,
+            )
         result = _finalize(
             outcome, frames, engine, metric, mode, target_bytes, input_path,
             input_kind, ctx_for, warnings, budget, out_path, report_path,
@@ -178,6 +188,77 @@ def encode(
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     return result
+
+
+def _native_search(
+    engine: FoveaNativeEngine, scales: list[float], ctx_for, score, workdir: str,
+    budget: Budget, ceiling: int, mode: str, invisible_threshold: float,
+) -> SearchOutcome:
+    """Drive the native engine's in-Rust byte-target search across the resolution
+    ladder. The Rust search guarantees a <= budget result at a given scale by lowering
+    the per-frame color budget, so we descend resolution only if even that overflows
+    (it almost never does). One Rust call per scale; every frame is kept."""
+    chosen: Candidate | None = None
+    best_over: Candidate | None = None
+    for scale in scales:
+        if budget.expired():
+            break
+        ctx = ctx_for(scale)
+        out = os.path.join(workdir, f"ns_{int(round(scale * 100))}.gif")
+        eo = engine.search_to_budget(ctx, ceiling, out)
+        budget.tick()
+        cand = Candidate(idx=0, size_bytes=eo.size_bytes, state=eo.state, out_path=out, scale=scale)
+        if cand.size_bytes <= ceiling:
+            chosen = cand
+            break
+        if best_over is None or cand.size_bytes < best_over.size_bytes:
+            best_over = cand
+    chosen = chosen or best_over
+    if chosen is None:
+        return SearchOutcome(
+            chosen=None, over_target=True, scale=scales[0], attempts=budget.attempts,
+            stopped_early=budget.stopped_early, stop_reason=budget.stop_reason or "exhausted",
+        )
+    score(chosen)
+    if mode == "invisible" and chosen.distance is not None and chosen.distance <= invisible_threshold:
+        chosen = _native_invisible_shrink(
+            engine, chosen, ctx_for, score, workdir, budget, invisible_threshold
+        )
+    return SearchOutcome(
+        chosen=chosen, over_target=chosen.size_bytes > ceiling, scale=chosen.scale,
+        attempts=budget.attempts, stopped_early=budget.stopped_early,
+        stop_reason=budget.stop_reason or "converged",
+    )
+
+
+def _native_invisible_shrink(
+    engine: FoveaNativeEngine, cand: Candidate, ctx_for, score, workdir: str,
+    budget: Budget, threshold: float,
+) -> Candidate:
+    """Walk the per-frame color budget *down* from the cap-fitting result while the
+    output stays under the invisible threshold — fewer colors = smaller file. Each probe
+    is a single fast encode (not a whole search); bounded by the budget. Only runs when
+    the cap result was already lossless (simple clips), so it stays cheap."""
+    from .levers import FFMPEG_COLORS
+
+    best = cand
+    ctx = ctx_for(best.scale)
+    start = int(best.state.colors or 256)
+    # A few descending rungs below the current palette (coarse, for speed).
+    rungs = [c for c in reversed(FFMPEG_COLORS) if c < start][::2][:5]
+    for c in rungs:
+        if budget.expired():
+            break
+        out = os.path.join(workdir, f"nsh_{c}.gif")
+        eo = engine.encode(ctx, LeverState(colors=c, dither=best.state.dither).with_(scale=best.scale), out)
+        budget.tick()
+        cc = Candidate(idx=0, size_bytes=eo.size_bytes, state=eo.state, out_path=out, scale=best.scale)
+        score(cc)
+        if cc.distance is not None and cc.distance <= threshold and cc.size_bytes < best.size_bytes:
+            best = cc  # smaller and still invisible
+        else:
+            break       # crossed into visible loss (or not smaller) — stop descending
+    return best
 
 
 def _finalize(

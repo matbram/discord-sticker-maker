@@ -13,6 +13,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 fg = pytest.importorskip("app.pipeline.fovea_gif")
 
 
+@pytest.fixture(autouse=True)
+def _force_legacy_bridge(monkeypatch):
+    # These tests stub _encode_once to exercise the *legacy* ffmpeg-path dance (fps
+    # floor, fit-rescue, frame-fill). The native engine bypasses that dance — it
+    # self-guarantees the byte fit in one call — so disable it here.
+    monkeypatch.setattr(fg, "_native_available", lambda: False)
+
+
 def _frames(n, hw=8):
     return [np.zeros((hw, hw, 4), np.uint8) for _ in range(n)], [100] * n  # 100ms -> n/10 s
 

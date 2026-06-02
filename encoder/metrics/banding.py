@@ -62,7 +62,11 @@ def rgba_to_oklab(stack_rgba: np.ndarray) -> np.ndarray:
 
 
 def box_blur(a: np.ndarray, radius: int) -> np.ndarray:
-    """Separable box blur over the last two axes (edge-padded), O(N) via cumsum."""
+    """Separable box blur over the last two axes (edge-padded), O(N) via cumsum.
+
+    Uses plain slicing (not fancy indexing) for the window difference, which is
+    several times faster on big stacks.
+    """
     if radius < 1:
         return a
     k = 2 * radius + 1
@@ -75,9 +79,11 @@ def box_blur(a: np.ndarray, radius: int) -> np.ndarray:
         zero_shape = list(cs.shape)
         zero_shape[axis] = 1
         cs = np.concatenate([np.zeros(zero_shape, cs.dtype), cs], axis=axis)
-        hi = np.take(cs, np.arange(k, k + n), axis=axis)
-        lo = np.take(cs, np.arange(0, n), axis=axis)
-        a = (hi - lo) / k
+        sl_hi = [slice(None)] * cs.ndim
+        sl_lo = [slice(None)] * cs.ndim
+        sl_hi[axis] = slice(k, k + n)
+        sl_lo[axis] = slice(0, n)
+        a = (cs[tuple(sl_hi)] - cs[tuple(sl_lo)]) / k
     return a
 
 
