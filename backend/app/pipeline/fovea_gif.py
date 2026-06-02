@@ -217,7 +217,7 @@ def _seconds_left(deadline: float | None, default: float) -> float:
 
 
 def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: str = "cap",
-               deadline: float | None = None):
+               deadline: float | None = None, allow_descent: bool = True):
     """Encode per ``priority``/``mode`` -> (bytes, n_frames, fps, colors, report).
 
     ``cap`` fills the byte budget (3-phase); ``invisible`` skips the budget-fill and
@@ -299,7 +299,7 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
         # palette suddenly fits far more real color. Shrink ONLY until no longer washed (the
         # highest such resolution), KEEPING the frames, and report the new size honestly.
         data, n, fps, colors, report = chosen
-        if mode != "invisible" and priority != "smooth" and not _rich(colors, report):
+        if allow_descent and mode != "invisible" and priority != "smooth" and not _rich(colors, report):
             import numpy as _np
             from PIL import Image as _Image
 
@@ -435,12 +435,15 @@ def _fovea_note(total: int, kept: int, colors) -> str:
 # --------------------------------------------------------------------------- #
 
 def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, priority="balanced",
-               mode="cap", deadline=None, notes=None):
-    """Return ``(bytes, "GIF", n_frames, fps, report)`` for the fitted frames under ``budget``."""
+               mode="cap", deadline=None, notes=None, allow_descent=True):
+    """Return ``(bytes, "GIF", n_frames, fps, report)`` for the fitted frames under ``budget``.
+
+    ``allow_descent`` lets the encoder trade resolution for color (Auto GIF); set False to
+    lock the given dimensions (Source / Custom W×H / square emoji) and fit via color only."""
     if _enabled():
         try:
             data, n, fps, colors, report = _run_fovea(
-                fitted, delays, int(budget), priority, mode, deadline)
+                fitted, delays, int(budget), priority, mode, deadline, allow_descent)
             if notes is not None:
                 notes.append(_fovea_note(len(fitted), n, colors))
                 if isinstance(report, dict) and report.get("scaled_dim"):
@@ -484,7 +487,7 @@ def _aligned_distance(metric, fitted, delays, gif_path, n_frames: int) -> float:
 
 
 def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24,
-                       priority="balanced", deadline=None, notes=None):
+                       priority="balanced", deadline=None, notes=None, allow_descent=True):
     """Encode with BOTH Fovea and the legacy encoder for a side-by-side (cap mode only).
 
     Returns ``(fovea_bytes, "GIF", n_frames, fps, comparison, legacy_bytes, report)``.
@@ -498,7 +501,7 @@ def gif_encode_compare(fitted, delays, *, budget, max_colors=256, fps_cap=24,
     td = tempfile.mkdtemp(prefix="fovea_cmp_")
     try:
         fovea_data, fovea_n, fovea_fps, fovea_colors, report = _run_fovea(
-            fitted, delays, int(budget), priority, "cap", deadline)
+            fitted, delays, int(budget), priority, "cap", deadline, allow_descent)
 
         sig = _legacy_sig(fitted, delays, budget, max_colors, fps_cap)
         cached = _legacy_get(sig)

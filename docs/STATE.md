@@ -16,17 +16,22 @@
 
 ## 0. Recent updates (latest session)
 
-### GIF dimensions: explicit W×H + "Source" (None) — branch `claude/youthful-bell-Nr3rP`
+### GIF dimensions: Auto (default) / Source / Custom W×H — branch `claude/youthful-bell-Nr3rP`
 
 The GIF dimension model was confusing: a single number (`max_dim`) meant the **longest
 edge** and the shape came from a *separate* "GIF shape" control, so "320" on a 360×640
-source produced 180×320, not 320×320. Replaced with **direct width×height entry** plus a
-**Source** option (the requested "None"):
-- **`OutputSpec.width`/`OutputSpec.height`** (`models.py`): both set → GIF is cropped to
-  *exactly* W×H (aspect = W:H). Neither set → keep the **source's own resolution** (the
-  "None"/Source default; up to the 640px working cap). `max_dim`+`aspect` stay as a
-  back-compat fallback for old clients. Fovea's resolution-for-color search is then the
-  only thing that shrinks a GIF to fit the byte budget.
+source produced 180×320, not 320×320. Replaced with three modes (all keep the source
+aspect ratio): **Auto** (default), **Source**, **Custom W×H** (`OutputSpec.dim_mode` +
+`width`/`height`):
+- **Auto (default)**: downscale within a cap (`GIF_AUTO_MAX`=512) and let the resolution-
+  for-color descent pick the *largest size that still holds rich color* — this is what
+  produces good color at small budgets (a 720×1280 portrait at 512KB → ~245×435 / **256
+  colors, perceptually lossless**). Making Source the default briefly **regressed colors**
+  (full-res 720×1280 at 512KB only fits ~2–6 colors); Auto is the fix.
+- **Source / Custom W×H**: *lock* the size (source resolution, or an exact W×H). The byte
+  budget is met by dropping color only (`allow_descent=False`) — so they can wash out at a
+  tight limit, which the UI states plainly. Square emoji also passes `allow_descent=False`
+  (it must stay 128×128). `max_dim`+`aspect` stay as a back-compat fallback (descent on).
 - **`orchestrator.py`** GIF branch resolves dims in that order; the square sticker/emoji
   path is unchanged. **`validate.py`** GIF checklist no longer asserts the dead
   `max_dim` cap — it shows the actual `W×H` instead.

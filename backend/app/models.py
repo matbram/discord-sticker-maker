@@ -109,11 +109,13 @@ class OutputSpec(BaseModel):
     max_bytes: Optional[int] = Field(None, ge=10 * 1024, le=64 * 1024 * 1024)
     max_dim: Optional[int] = Field(None, ge=16, le=1024)
     # GIF only: exact output dimensions. When both are set the GIF is cropped to exactly
-    # width×height (aspect = width:height). When neither is set the GIF keeps the source's
-    # own resolution (the "None"/Source option) — the byte budget is then the only thing
-    # that may shrink it. ``max_dim``+``aspect`` remain as a back-compat fallback.
+    # width×height (aspect = width:height). ``dim_mode`` selects how the GIF is sized when
+    # width/height aren't given: "auto" (default) lets the encoder downscale within a cap to
+    # keep rich color; "source" locks the source's own resolution (may wash at tight budgets).
+    # ``max_dim``+``aspect`` remain a back-compat longest-edge fallback.
     width: Optional[int] = Field(None, ge=16, le=1024)
     height: Optional[int] = Field(None, ge=16, le=1024)
+    dim_mode: str = "auto"  # "auto" | "source" (GIF only; width/height override)
     gif_quality: GifQuality = GifQuality.balanced
     aspect: GifAspect = GifAspect.source  # legacy GIF shape; superseded by width/height
     # Per-output framing — falls back to the shared ProcessParams values when unset,

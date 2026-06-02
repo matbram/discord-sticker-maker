@@ -56,11 +56,12 @@
   // Mirror of backend orchestrator WORK_MAX_SIDE: source frames are capped to this longest
   // side, so "Source" can't exceed it. Keep in sync with FOVEA_WORK_MAX_SIDE on the backend.
   const WORK_MAX_SIDE = 1280
-  // GIF dimensions are width×height (or null/null = Source: keep the source's own size).
-  // Sticker/emoji are square, so they keep a single side (`dim`).
+  // GIF sizing: mode 'auto' (encoder picks the size for the richest color, default),
+  // 'source' (lock the source resolution), or 'custom' (exact width×height). All keep the
+  // source aspect ratio. Sticker/emoji are square, so they keep a single side (`dim`).
   function defaultLimits() {
     return {
-      gif: { bytes: 5242880, width: null, height: null },
+      gif: { bytes: 5242880, mode: 'auto', width: null, height: null },
       sticker: { bytes: 524288, dim: 320 },
       emoji: { bytes: 262144, dim: 128 }
     }
@@ -166,10 +167,9 @@
     const lim = (t) => {
       if (t === 'gif') {
         const g = limits.gif
-        // Custom W×H -> send exact dims; Source (null/null) -> send nothing, backend keeps source res.
-        return (g.width && g.height)
-          ? { max_bytes: g.bytes, width: g.width, height: g.height }
-          : { max_bytes: g.bytes }
+        if (g.mode === 'custom' && g.width && g.height) return { max_bytes: g.bytes, width: g.width, height: g.height }
+        if (g.mode === 'source') return { max_bytes: g.bytes, dim_mode: 'source' }
+        return { max_bytes: g.bytes }   // auto: encoder picks the size for best color
       }
       return { max_bytes: limits[t].bytes, max_dim: limits[t].dim }
     }
@@ -264,15 +264,16 @@
   function setGifQuality(q) { params = { ...params, gif_quality: q }; scheduleRegen() }
   function setLimitBytes(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], bytes: v } }; persistLimits(); scheduleRegen() }
   function setLimitDim(v) { limits = { ...limits, [focusedType]: { ...limits[focusedType], dim: v } }; persistLimits(); scheduleRegen() }
-  // GIF dimensions: Source (null W×H) keeps the source's own size; Custom uses exact W×H.
-  function setGifDims(w, h) { limits = { ...limits, gif: { ...limits.gif, width: w, height: h } }; persistLimits(); scheduleRegen() }
-  function useGifSource() { setGifDims(null, null) }
-  function useGifCustom() {   // seed from the source the first time; keep prior values otherwise
-    if (!(limits.gif.width && limits.gif.height)) setGifDims(sourceW || 320, sourceH || 320)
+  // GIF sizing modes. Auto (default) lets the encoder pick the size for the richest color;
+  // Source locks the source resolution; Custom uses an exact W×H. All keep the source aspect.
+  function setGifMode(mode) {
+    const g = { ...limits.gif, mode }
+    if (mode === 'custom' && !(g.width && g.height)) { g.width = sourceW || 320; g.height = sourceH || 320 }
+    limits = { ...limits, gif: g }; persistLimits(); scheduleRegen()
   }
   const clampDim = (v) => Math.min(1024, Math.max(16, Math.round(parseFloat(v) || 0)))
-  function setGifW(e) { setGifDims(clampDim(e.target.value), limits.gif.height || sourceH || 320) }
-  function setGifH(e) { setGifDims(limits.gif.width || sourceW || 320, clampDim(e.target.value)) }
+  function setGifW(e) { limits = { ...limits, gif: { ...limits.gif, mode: 'custom', width: clampDim(e.target.value), height: limits.gif.height || sourceH || 320 } }; persistLimits(); scheduleRegen() }
+  function setGifH(e) { limits = { ...limits, gif: { ...limits.gif, mode: 'custom', width: limits.gif.width || sourceW || 320, height: clampDim(e.target.value) } }; persistLimits(); scheduleRegen() }
   // Parse a freeform size like "800KB" / "3.5MB" (binary units, matching the encoder).
   function parseSize(str) {
     const m = String(str).trim().match(/^([0-9]*\.?[0-9]+)\s*(b|kb|kib|mb|mib|g|gb|gib)?$/i)
@@ -313,8 +314,9 @@
   $: userOutputs = outputs.filter((o) => !String(o.type).includes('__cmp'))
 
   $: fr = framing[focusedType] || framing.gif
-  $: gifCustom = !!(limits.gif?.width && limits.gif?.height)
-  $: gifAR = gifAspect(limits.gif?.width, limits.gif?.height, sourceW, sourceH)
+  $: gifMode = limits.gif?.mode || 'auto'
+  $: gifCustom = gifMode === 'custom' && !!(limits.gif?.width && limits.gif?.height)
+  $: gifAR = gifAspect(gifCustom ? limits.gif.width : null, gifCustom ? limits.gif.height : null, sourceW, sourceH)
   $: focusAspect = focusedType === 'gif' ? gifAR : [1, 1]
   // Source frames are capped to WORK_MAX_SIDE, so "Source" yields this, not the raw file size.
   $: srcCap = (sourceW && sourceH)
@@ -479,10 +481,11 @@
           {#if focusedType === 'gif'}
             <div class="ctl"><span class="ctl-label">Dimensions</span>
               <div class="chips">
-                <button class="chip" class:on={!gifCustom} on:click={useGifSource}>Source</button>
-                <button class="chip" class:on={gifCustom} on:click={useGifCustom}>Custom W×H</button>
+                <button class="chip" class:on={gifMode === 'auto'} on:click={() => setGifMode('auto')}>Auto</button>
+                <button class="chip" class:on={gifMode === 'source'} on:click={() => setGifMode('source')}>Source</button>
+                <button class="chip" class:on={gifMode === 'custom'} on:click={() => setGifMode('custom')}>Custom W×H</button>
               </div>
-              {#if gifCustom}
+              {#if gifMode === 'custom'}
                 <div class="wh-row">
                   <input class="custom-in wh" type="number" min="16" max="1024" placeholder="width"
                          value={limits.gif.width ?? ''} on:change={setGifW} />
@@ -490,9 +493,11 @@
                   <input class="custom-in wh" type="number" min="16" max="1024" placeholder="height"
                          value={limits.gif.height ?? ''} on:change={setGifH} />
                 </div>
-                <span class="muted-line">Output {limits.gif.width}×{limits.gif.height} px (may shrink to fit the file size limit).</span>
+                <span class="muted-line">Locks {limits.gif.width}×{limits.gif.height} px — color drops to fit the file size (raise the limit if it looks washed).</span>
+              {:else if gifMode === 'source'}
+                <span class="muted-line">Locks the source size{srcCap[0] ? ` (${srcCap[0]}×${srcCap[1]})` : ''} — color drops to fit the file size (raise the limit, or use Auto, if it looks washed).</span>
               {:else}
-                <span class="muted-line">Keeps the source size{srcCap[0] ? ` (${srcCap[0]}×${srcCap[1]})` : ''} — only the file size limit shrinks it.</span>
+                <span class="muted-line">Best color for your file size — the encoder picks the size (keeps your aspect ratio).</span>
               {/if}
             </div>
           {:else}

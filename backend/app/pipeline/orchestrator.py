@@ -22,6 +22,8 @@ log = get_logger("orchestrator")
 
 EmitFn = Callable[..., None]
 MATTING_MAX_SIDE = 512   # matte at <=512 for memory/speed
+GIF_AUTO_MAX = 512       # "Auto" GIF: cap the longest side here, then the resolution-for-color
+                         #   descent picks the largest size that still holds rich color.
 # Working/cached frames are capped to this longest side — and it's the ceiling for a GIF's
 # "Source" dimensions, so it must be >= common source sizes (a 720x1280 phone clip needs
 # 1280, not the old 640 which halved it to 360x640). Env-tunable: raise for crisper
@@ -153,25 +155,33 @@ def process(source: Source, params, emit: EmitFn,
                 if is_anim and prof["animated_format"] == "APNG":
                     data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
                 elif is_anim and prof["animated_format"] == "GIF":
+                    # Square emoji: its dimensions are fixed (Discord requires 128×128), so the
+                    # encoder must NOT trade resolution for color here.
                     data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
                         fitted, de, budget=budget, max_colors=eff.max_colors,
                         fps_cap=prof.get("fps_cap", 30), priority=_v(eff.priority),
-                        mode=mode, deadline=out_deadline, notes=notes)
+                        mode=mode, deadline=out_deadline, notes=notes, allow_descent=False)
                 else:
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None
             else:
-                # GIF dimensions: exact width×height if both given, else the source's own
-                # resolution ("None"/Source). The byte budget (via Fovea's resolution search)
-                # is the only thing that shrinks it from there. max_dim+aspect: back-compat.
+                # GIF dimensions (all keep the SOURCE aspect ratio):
+                #   * Custom W×H  -> exact dims; size is locked, color flexes to fit (no descent).
+                #   * Source      -> the source's own resolution; locked, color flexes (no descent).
+                #   * Auto (default) -> downscale within GIF_AUTO_MAX, then let the resolution-for-
+                #                       color descent pick the largest size that holds rich color.
+                #   * max_dim     -> back-compat longest-edge (treated like Auto: descent on).
                 sh, sw = fr[0].shape[:2]
+                dim_mode = _v(spec.dim_mode)
                 if spec.width and spec.height:
-                    aw, ah, long_side = spec.width, spec.height, max(spec.width, spec.height)
+                    aw, ah, long_side, descend = spec.width, spec.height, max(spec.width, spec.height), False
+                elif dim_mode == "source":
+                    aw, ah, long_side, descend = sw, sh, max(sw, sh), False
                 elif spec.max_dim:
                     aw, ah = resolve_aspect(spec.aspect, sw, sh)
-                    long_side = spec.max_dim
+                    long_side, descend = spec.max_dim, True
                 else:
-                    aw, ah, long_side = sw, sh, max(sw, sh)
+                    aw, ah, long_side, descend = sw, sh, min(max(sw, sh), GIF_AUTO_MAX), True
                 fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, long_side)
                 h, w = fitted[0].shape[:2]
                 src_de = de if is_anim else [100]
@@ -181,7 +191,7 @@ def process(source: Source, params, emit: EmitFn,
                          comparison, baseline_data, report) = fovea_gif.gif_encode_compare(
                             fitted, src_de, budget=budget, max_colors=eff.max_colors,
                             fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
-                            deadline=out_deadline, notes=notes)
+                            deadline=out_deadline, notes=notes, allow_descent=descend)
                         comparison["baseline_output"] = f"{otype}__cmp"
                         log.info(
                             "audit.gif.compare", type=otype, primary="fovea",
@@ -198,12 +208,12 @@ def process(source: Source, params, emit: EmitFn,
                         data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
                             fitted, src_de, budget=budget, max_colors=eff.max_colors,
                             fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
-                            mode=mode, deadline=out_deadline, notes=notes)
+                            mode=mode, deadline=out_deadline, notes=notes, allow_descent=descend)
                 else:
                     data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
                         fitted, src_de, budget=budget, max_colors=eff.max_colors,
                         fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
-                        mode=mode, deadline=out_deadline, notes=notes)
+                        mode=mode, deadline=out_deadline, notes=notes, allow_descent=descend)
 
         # Report the GIF's REAL dimensions: Fovea may have descended resolution to fit the
         # budget (keeping the source aspect), so the encoded canvas can be smaller than the
