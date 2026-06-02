@@ -53,6 +53,9 @@
     { label: '5 MB', v: 5242880 }, { label: '8 MB', v: 8388608 }
   ]
   const DIM_PRESETS = [128, 256, 320, 360, 480, 512]
+  // Mirror of backend orchestrator WORK_MAX_SIDE: source frames are capped to this longest
+  // side, so "Source" can't exceed it. Keep in sync with FOVEA_WORK_MAX_SIDE on the backend.
+  const WORK_MAX_SIDE = 1280
   // GIF dimensions are width×height (or null/null = Source: keep the source's own size).
   // Sticker/emoji are square, so they keep a single side (`dim`).
   function defaultLimits() {
@@ -313,6 +316,13 @@
   $: gifCustom = !!(limits.gif?.width && limits.gif?.height)
   $: gifAR = gifAspect(limits.gif?.width, limits.gif?.height, sourceW, sourceH)
   $: focusAspect = focusedType === 'gif' ? gifAR : [1, 1]
+  // Source frames are capped to WORK_MAX_SIDE, so "Source" yields this, not the raw file size.
+  $: srcCap = (sourceW && sourceH)
+    ? (Math.max(sourceW, sourceH) <= WORK_MAX_SIDE
+        ? [sourceW, sourceH]
+        : [Math.round(sourceW * WORK_MAX_SIDE / Math.max(sourceW, sourceH)),
+           Math.round(sourceH * WORK_MAX_SIDE / Math.max(sourceW, sourceH))])
+    : [0, 0]
   $: focusOut = outputs.find((o) => o.type === focusedType)
   $: focusBaked = focusOut && doneJob ? previewUrl(focusedType) : ''
   $: focusMeta = TYPES.find((t) => t.id === focusedType) || TYPES[0]
@@ -482,7 +492,7 @@
                 </div>
                 <span class="muted-line">Output {limits.gif.width}×{limits.gif.height} px (may shrink to fit the file size limit).</span>
               {:else}
-                <span class="muted-line">Keeps the source size{sourceW ? ` (${sourceW}×${sourceH})` : ''} — only the file size limit shrinks it.</span>
+                <span class="muted-line">Keeps the source size{srcCap[0] ? ` (${srcCap[0]}×${srcCap[1]})` : ''} — only the file size limit shrinks it.</span>
               {/if}
             </div>
           {:else}

@@ -35,6 +35,12 @@ source produced 180×320, not 320×320. Replaced with **direct width×height ent
   Square/Source/16:9 control is **removed** (W×H subsumes it). Live preview aspect comes
   from the chosen W×H (or source) via the shared `gifAspect()` helper. Sticker/emoji keep
   their square `{size}px` presets. `npm run build` clean; 71 backend tests pass.
+- **Working-resolution cap raised** (`orchestrator.py` `WORK_MAX_SIDE` 640 → **1280**,
+  env `FOVEA_WORK_MAX_SIDE`): the old 640 cap (a stale "outputs ≤480" assumption) silently
+  halved a 720×1280 phone clip to 360×640, so "Source" could never mean source. Now source
+  frames up to 1280px pass through, and the Source label shows the *actual* capped dims
+  (`min(source, cap)`), not the raw file size, so it no longer over-promises. (The byte
+  budget still shrinks it from there — true source res needs a generous file-size limit.)
 
 ### Resolution-for-color: the third RD lever (fixes washout while keeping ≥24 frames) — branch `claude/youthful-bell-Nr3rP`
 

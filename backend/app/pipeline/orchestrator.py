@@ -22,7 +22,11 @@ log = get_logger("orchestrator")
 
 EmitFn = Callable[..., None]
 MATTING_MAX_SIDE = 512   # matte at <=512 for memory/speed
-WORK_MAX_SIDE = 640      # working/cached frames capped here (outputs are <=480)
+# Working/cached frames are capped to this longest side — and it's the ceiling for a GIF's
+# "Source" dimensions, so it must be >= common source sizes (a 720x1280 phone clip needs
+# 1280, not the old 640 which halved it to 360x640). Env-tunable: raise for crisper
+# source-res GIFs (costs memory + encode time), lower if the box is memory-constrained.
+WORK_MAX_SIDE = int(os.getenv("FOVEA_WORK_MAX_SIDE", "1280"))
 MATTE_FRAME_CAP = max(profile_for(t)["frame_cap"] for t in ("sticker", "emoji", "gif"))
 
 
