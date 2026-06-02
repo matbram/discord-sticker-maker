@@ -4,8 +4,9 @@
 > works / what's next." Last updated: the session that built the **native Rust
 > encoder** (`fovea-core`) — per-frame local palettes + perceptual OKLab delta that
 > **dissolves the frames-vs-color "ceiling"** (§4.2/§4.3) — wired it behind the
-> Engine ABC, and **activated the M0 corpus** (synthetic generator). Branch
-> `claude/youthful-bell-Nr3rP`. See §0.
+> Engine ABC, **activated the M0 corpus**, then (Phase 2) made the metric
+> **trustworthy on color** (banding-aware OKLab term) and **retired the bridge's
+> frame-trim bandaid** on the native path. Branch `claude/youthful-bell-Nr3rP`. See §0.
 > Companion docs: `docs/fovea-spec.md` (the why), `docs/architecture.md`,
 > `docs/metrics.md`, `docs/bench.md`, `docs/cli.md`, `docs/m2-judge.md` (the learned judge).
 
@@ -56,6 +57,40 @@ below) since per-frame palettes make "all frames + rich color" fit. Phase 3 (moo
 **region/multi-block palettes** for >256 colors in a single frame, and **delta-with-alpha**
 (erase via per-frame dispose) so stickers also get delta savings. Then head-to-head vs
 `ffmpeg-palette` on the corpus in Docker to publish the "better at equal size" table (§11).
+
+### Phase 2 — trustworthy color metric + bandaid retired (same branch)
+
+The metric is now **trusted on color**, and the bridge's frame-trimming bandaid is gone
+on the native path. Both shipped + tested.
+
+- **Banding-aware default metric** (`encoder/metrics/banding.py`, `ColorAwareMetric` in
+  `perceptual.py`). The old judge scored **luma** MS-SSIM, which is structurally blind to
+  *chroma* banding and can even prefer it to dither (the blind spot in `docs/m2-judge.md`
+  that forced the color-floor bandaid). The new term low-pass-filters both images in
+  **OKLab** and measures ΔE: dithering preserves the local mean (low error), banding
+  shifts it in steps (high error) — exactly inverting MS-SSIM's mistake, *and* it sees
+  chroma. `distance = (1−MS-SSIM) + β·temporal + γ·banding` (γ=3), now the **default**
+  (`default_metric()`); pure MS-SSIM stays available as `"msssim"` for comparison.
+  Validated: on a chroma ramp where MS-SSIM rates hard banding at 0.05 (≈lossless), the
+  color-aware metric rates it **0.47 vs 0.03 for dither** — reliably prefers dither.
+  `invisible_threshold=0.02` lands between good-dither (≈0.008) and banding (≈0.033).
+  Tests: `tests/test_banding_metric.py`. *(This makes the always-available metric trusted
+  on color, so the M2 CNN is no longer needed as the default — it stays opt-in via
+  `FOVEA_METRIC=learned` for motion-awareness; bundling its `.onnx` is deferred until the
+  trained artifact exists.)*
+- **RD search**: with a trustworthy distance, the existing "minimise distance s.t. ≤
+  budget over colors + dither" search *is* rate-distortion and now makes the right color
+  call (it will keep dither/rich color instead of banding). A joint delta-threshold lever
+  was scoped out (the default ΔE≈0.02 is already ~1 JND; a proper joint search needs
+  deeper `guided_search` surgery for marginal gain) — noted as a future refinement.
+- **Bridge bandaid retired** (`backend/app/pipeline/fovea_gif.py`). When the native engine
+  is built, `_run_fovea` skips the color-seeking frame-trim (2a) and frame-fill (3) — per-
+  frame palettes already give rich color with every frame, so trimming only threw frames
+  away. The **mandatory fit-rescue (2b)** still runs (the byte cap is hard), and the
+  **legacy ffmpeg fallback keeps the full dance** (it still has the single-palette limit).
+  Net: on the native path, `priority` (smooth/balanced/sharp) is now effectively a no-op —
+  the tradeoff it managed no longer exists (a product decision for whether to repurpose
+  the control). `FOVEA_FORCE_LEGACY_BRIDGE=1` is an escape hatch.
 
 ---
 

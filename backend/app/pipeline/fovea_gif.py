@@ -4,8 +4,11 @@ The orchestrator's GIF outputs (gif + emoji) route through here. We run Fovea's
 ``encode()`` to hit the byte budget while judging quality perceptually, with the
 legacy ffmpeg path as an automatic fallback.
 
-The budget is split between frames (smoothness) and colors (richness) per a
-``priority`` (reusing the smooth/balanced/sharp control):
+When the **native engine** is built (`FoveaNativeEngine`), per-frame local palettes
+give rich color with *every* frame kept, so we trust the metric-driven encode and the
+frames-vs-color ``priority`` dance below is skipped (priority is effectively a no-op on
+that path — the tradeoff it managed no longer exists). The split below applies to the
+**legacy ffmpeg fallback**, whose single global palette still forces the tradeoff:
 
   * smooth   — frames first: keep every frame; color is whatever fits.
   * balanced — most frames whose palette still fills the budget, then top off
@@ -55,6 +58,20 @@ def _color_floor_for(priority: str) -> int:
     if not _autobalance_enabled():
         return 0
     return {"smooth": 0, "balanced": 64, "sharp": 160}.get(priority, 64)
+
+
+def _native_available() -> bool:
+    """True when the native per-frame-palette engine is built. It keeps every frame
+    AND rich color, so the color-floor frame-trimming bandaid below is unnecessary on
+    that path. ``FOVEA_FORCE_LEGACY_BRIDGE=1`` forces the legacy dance (escape hatch)."""
+    if os.getenv("FOVEA_FORCE_LEGACY_BRIDGE", "").lower() in ("1", "true", "yes"):
+        return False
+    try:
+        from encoder.core.engines import FoveaNativeEngine
+
+        return FoveaNativeEngine.available()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -220,7 +237,14 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
         log.info("fovea.invisible_fallback frames=%d colors=%s bytes=%d lossless=False; "
                  "using cap budget-fill", total, colors, len(data))
 
-    floor = _color_floor_for(priority)
+    # Native engine: per-frame local palettes deliver rich color with EVERY frame kept,
+    # and a now-trustworthy color-aware metric drives the search — so the color-seeking
+    # frame-trim (2a) and frame-fill (3) below are disabled (floor=0 + the `native`
+    # flag). They only existed because one global palette couldn't do both; on this path
+    # they would just throw frames away. The mandatory fit-rescue (2b) still runs so the
+    # hard byte cap is always met. The legacy ffmpeg fallback keeps the full dance.
+    native = _native_available()
+    floor = 0 if native else _color_floor_for(priority)
     # fps floor: never trim into a slideshow. 'sharp' may trim further for richer color
     # than the smoother modes, but both stay above a watchable frame rate. Duration is
     # preserved across subsampling, so frames / duration == output fps.
@@ -279,7 +303,9 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
         data, n, fps, colors, usage, report = chosen
     # 3. Frame-fill: top off the budget by adding frames back at the chosen palette+dither
     #    (more frames = smoother, no extra washout). Never leave budget on the table.
-    if (priority != "smooth" and usage < target and n < total and colors
+    #    Skipped on the native path: it keeps every frame already (n == total unless the
+    #    fit-rescue had to trim, in which case re-adding frames would just re-overshoot).
+    if (not native and priority != "smooth" and usage < target and n < total and colors
             and (deadline is None or (deadline - time.monotonic()) > 1.0)):
         filled = _fill_frames_at_colors(fitted, delays, budget, n, len(data), int(colors),
                                         report.get("dither"))

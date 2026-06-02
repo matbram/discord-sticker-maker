@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 from ..core.frames import Frames
+from .banding import banding_per_frame
 from .base import DistanceResult, Metric
 from .msssim import msssim_per_frame
 from .temporal import temporal_distance
@@ -80,5 +81,58 @@ class PerceptualMetric(Metric):
             extra={
                 "msssim_mean": float(msssim_f.mean()),
                 "min_msssim": float(msssim_f.min()) if msssim_f.size else 1.0,
+            },
+        )
+
+
+class ColorAwareMetric(Metric):
+    """MS-SSIM + temporal **+ a banding-aware OKLab color term** — the default judge.
+
+    Luma MS-SSIM alone is blind to color banding and actually prefers it to dither
+    (``docs/m2-judge.md``), which is what forced the bridge's color-floor bandaid.
+    Adding the low-pass-OKLab ΔE term (``banding.py``) makes the distance fall when
+    the result is *more* faithful in color — so the search, which already minimises
+    distance under the byte budget, can finally be trusted to pick rich color over
+    washout. ``gamma`` weights the color term; ``per_frame`` (and ``worst_frame``)
+    fold it in so the honesty report still points at where loss is worst.
+    """
+
+    name = "msssim+temporal+color"
+
+    def __init__(
+        self, *, beta: float = 0.5, gamma: float = 3.0, invisible_threshold: float = 0.02
+    ) -> None:
+        self.beta = beta
+        self.gamma = gamma
+        self.invisible_threshold = invisible_threshold
+
+    def distance(self, reference: Frames, candidate: Frames) -> DistanceResult:
+        ref_l = composite_luma_stack(reference.frames)
+        cand_l = composite_luma_stack(candidate.frames)
+        n = min(ref_l.shape[0], cand_l.shape[0])
+        ref_l, cand_l = ref_l[:n], cand_l[:n]
+        cand_l = _resize_luma_stack(cand_l, ref_l.shape[1:])
+
+        msssim_f = msssim_per_frame(ref_l, cand_l)
+        struct = 1.0 - msssim_f                                  # per-frame structural loss
+        band = banding_per_frame(reference.frames, candidate.frames)  # per-frame OKLab ΔE
+        band = band[:n]
+        temporal, _ = temporal_distance(ref_l, cand_l)
+
+        per_frame = struct + self.gamma * band
+        spatial = float(per_frame.mean())
+        distance = spatial + self.beta * temporal
+        worst = int(np.argmax(per_frame)) if per_frame.size else 0
+        return DistanceResult(
+            distance=distance,
+            per_frame=per_frame.tolist(),
+            spatial=spatial,
+            temporal=temporal,
+            worst_frame=worst,
+            extra={
+                "msssim_mean": float(msssim_f.mean()),
+                "min_msssim": float(msssim_f.min()) if msssim_f.size else 1.0,
+                "band_mean": float(band.mean()) if band.size else 0.0,
+                "band_max": float(band.max()) if band.size else 0.0,
             },
         )

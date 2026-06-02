@@ -31,20 +31,26 @@ def _try_learned() -> Metric | None:
 
 def default_metric() -> Metric:
     from . import external
-    from .perceptual import PerceptualMetric
+    from .perceptual import ColorAwareMetric
 
-    # Opt-in only: MS-SSIM stays the default until the learned judge is proven out.
+    # The learned judge (opt-in) wins when present; otherwise the color-aware judge
+    # (MS-SSIM + temporal + banding-aware OKLab term) is the default so the search
+    # can be trusted on color. Pure MS-SSIM stays available by name for comparison.
     if os.getenv("FOVEA_METRIC", "").lower() == "learned":
         lm = _try_learned()
         if lm is not None:
             return lm
-    return external.best_available() or PerceptualMetric()
+    if os.getenv("FOVEA_METRIC", "").lower() in ("msssim", "msssim+temporal"):
+        from .perceptual import PerceptualMetric
+
+        return PerceptualMetric()
+    return external.best_available() or ColorAwareMetric()
 
 
 def available_metrics() -> list[str]:
     from . import external, learned
 
-    names = ["msssim", "msssim+temporal"]
+    names = ["msssim", "msssim+temporal", "color", "msssim+temporal+color"]
     if learned.model_available():
         names.append("learned")
     return names + external.available_external()
@@ -52,12 +58,14 @@ def available_metrics() -> list[str]:
 
 def get_metric(name: str | None) -> Metric:
     """Resolve a metric by name (``"auto"``/``None`` -> default)."""
-    from .perceptual import PerceptualMetric
+    from .perceptual import ColorAwareMetric, PerceptualMetric
 
     if name in (None, "auto"):
         return default_metric()
     if name in ("msssim", "msssim+temporal"):
         return PerceptualMetric()
+    if name in ("color", "msssim+temporal+color"):
+        return ColorAwareMetric()
     if name == "learned":
         lm = _try_learned()
         if lm is not None:
