@@ -1,8 +1,10 @@
 # Fovea — Project State & Handoff (living document)
 
 > **Read this first when resuming.** It is the canonical "where we are / how it
-> works / what's next." Last updated: the session that shipped the §8.2 quick wins
-> and built the M2 learned-judge foundation (flag-gated) — see §0 below.
+> works / what's next." Last updated: the session that shipped the §8.2 quick wins,
+> the **M2 learned-judge foundation**, the production-log fixes, the per-edit
+> **latency** work, and the **fps-floor / budget-fill / single-source-metric** bridge
+> round — all on branch `claude/inspiring-cray-wBFKB` (**PR #3**). See §0.
 > Companion docs: `docs/fovea-spec.md` (the why), `docs/architecture.md`,
 > `docs/metrics.md`, `docs/bench.md`, `docs/cli.md`, `docs/m2-judge.md` (the learned judge).
 
@@ -10,25 +12,56 @@
 
 ## 0. Recent updates (latest session)
 
-**Quick wins (§8.2) — shipped.** Per-output `priority` (the GIF's Frames-vs-color no
-longer moves the sticker/emoji); an **invisible mode** UI toggle (smallest
-perceptually-lossless size) threaded `OutputSpec.mode` → orchestrator → bridge (invisible
-bypasses the budget-fill); the encoder's **honesty report** (lossless? / loss locus /
-stop reason) now reaches `StickerMeta.report` and the UI; a **warning** when the
-Fovea-vs-standard comparison falls back instead of failing silently; and a **global
-per-job deadline** (`FOVEA_JOB_SECONDS`, default 100s, under the 120s watchdog) threaded
-into the multi-encode loop. *Deferred:* defaults tuning (needs M0).
+Branch **`claude/inspiring-cray-wBFKB`** → **PR #3** (pushing more commits updates that
+PR; do not open another). Full suite is **68 tests green**. Six threads landed:
+
+**Quick wins (§8.2) — shipped.** Per-output `priority` **and** `mode`: the GIF's
+Frames-vs-color (and the new invisible toggle) no longer move the sticker/emoji, and the
+choices persist to `dsm_outopts_v1`. **Invisible mode** is wired end-to-end
+(`OutputSpec.mode` → orchestrator → bridge). The encoder's **honesty report** reaches
+`StickerMeta.report` and renders as a one-line verdict in the UI. A **warning** note now
+fires when the Fovea-vs-standard comparison falls back instead of failing silently. A
+**global per-job deadline** (`FOVEA_JOB_SECONDS`, 100s, under the 120s watchdog) bounds
+the whole multi-encode job. *Deferred:* defaults tuning (still needs M0).
 
 **M2 learned judge — foundation built, flag-gated** (full writeup: `docs/m2-judge.md`).
-A small ONNX/onnxruntime CNN judge (`encoder/metrics/learned.py`) trained on real
-GitHub-hosted clips + synthetic degradations with *derivable* labels
-(`encoder/metrics/training/`). On held-out clips it scores **100% on the
-dithered-vs-banded case where MS-SSIM sits at chance (50%)** — the exact blind spot that
-forces the bridge's color-floor heuristic (§3.5/§4.3). **OFF by default**
-(`FOVEA_METRIC=learned` to opt in); MS-SSIM stays default and there is a graceful
-fallback when the model/runtime is absent. The `.onnx` is gitignored (reproduce via the
-training pipeline); **not yet wired into the Docker image**, and **human-preference
-validation remains the outstanding gate** before it can become the default.
+A small ONNX/onnxruntime CNN judge (`encoder/metrics/learned.py`) + a training pipeline
+(`encoder/metrics/training/`) over real GitHub-hosted clips + synthetic degradations with
+*derivable* labels. On held-out clips it scores **100% on the dithered-vs-banded case
+where MS-SSIM sits at chance (50%)** — the exact blind spot that forces the bridge's
+color-floor heuristic (§3.5/§4.3). **OFF by default** (`FOVEA_METRIC=learned` to opt in);
+MS-SSIM stays default with a graceful fallback when the model/runtime is absent. The
+`.onnx` is gitignored (reproduce via the pipeline). Harness: `fovea-bench judge-eval`.
+
+**Production-log fixes.** Encoder logging now goes to **stdout** (was stderr, which
+Railway filed as an ERROR on every encode). Invisible mode **falls back to cap
+budget-fill** when a clip can't be made losslessly small — the encoder never trims
+frames, so a stuck low-palette invisible result was washed out and *worse* than the
+default; falling through guarantees invisible is never worse than cap
+(`tests/test_invisible_fallback.py`).
+
+**Latency (per-edit).** A **source cache** (`backend/app/source_cache.py`) lets the
+browser upload once and reference the source by `source_id` on every regenerate (POST
+~13s → ~6ms; transparent re-upload on a 409 `source_expired`). A **legacy-baseline
+cache** stops the side-by-side re-running the standard encoder when only `priority`
+changed. SSE keepalive tightened **60s → 15s**, plus a **per-output deadline**
+(`FOVEA_OUTPUT_SECONDS=45`) — together these killed the `ERR_CONNECTION_RESET` /
+`watchdog_timeout` on slow 512px encodes.
+
+**Bridge quality (3 fixes from production logs).** (1) **fps floor** (`FOVEA_MIN_FPS=8`,
+`FOVEA_MIN_FPS_SHARP=5`) + a **fit-rescue** so trimming never makes a 2-fps slideshow yet
+still yields to the hard byte budget. (2) **Budget-fill dither fix**: frame-fill now
+re-encodes at the *chosen* candidate's dither (was always `sierra2_4a`), so the size
+estimate is right and we stop leaving budget on the table. (3) **Single source of
+truth**: the comparison card's Fovea %/lossless now come from the encoder report, so the
+side-by-side badge can't contradict the honesty line. Verified on the 512px/512KB sharp
+case: **6f / 2.1fps / 80% → 12f / 5.2fps / 95%**.
+
+**What's left (next).** Gate M2 to default via **human-preference validation**, then drop
+the color-floor heuristic and let the search optimize the learned distance directly; wire
+the M2 `.onnx` into the Docker image; activate the **M0 corpus** (§8.1); add **resolution
+as a bridge lever** for the genuinely resolution-bound cases (the 512px clip is
+dimension-limited, not budget-limited); then M3/M4/M5 (§8.4–8.6). See §8.8 for order.
 
 ---
 
@@ -49,7 +82,8 @@ validation remains the outstanding gate** before it can become the default.
   placeholder (numpy MS-SSIM + temporal) that **under-values dithering/banding**.
   It cannot be trusted to judge color washout — which is why the GIF budget logic
   is heuristic, not metric-driven. The real fix is **M2 (a learned motion-aware
-  metric)**.
+  metric)** — whose **foundation is now built and flag-gated** (§0), pending human
+  validation before it can become the default.
 
 ---
 
@@ -71,16 +105,19 @@ encoder/                      # THE IP (standalone; does NOT import backend)
     result.py                 # EncodeResult + EncodeReport + LossLocus (pydantic)
     logging.py                # stdlib-based structured logger (FOVEA_LOG_LEVEL)
   metrics/
-    base.py msssim.py temporal.py perceptual.py external.py __init__.py
+    base.py msssim.py temporal.py perceptual.py external.py __init__.py (flag-gated registry)
+    learned.py judge_features.py   # M2 learned judge (onnxruntime); OFF unless FOVEA_METRIC=learned
+    training/                      # M2 data+train+export pipeline (synth/fetch clips, degrade, model, train, export)
   cli/main.py                 # `fovea encode ...`
-bench/                        # M0 harness: manifest.py records.py runners.py run.py cli.py corpus/(no clips committed)
-tests/                        # 50 unit tests (no binaries) + test_integration_smoke.py (gated on ffmpeg/gifsicle)
-docs/                         # specs + this file
-backend/app/pipeline/fovea_gif.py   # *** the live integration bridge (backend) ***
-backend/app/pipeline/orchestrator.py# threads budget/dims/priority into the GIF path
-backend/app/models.py               # OutputSpec.max_bytes/max_dim/priority; StickerMeta.comparison
-backend/app/main.py                 # audit.request / audit.store / audit.serve (+ SHA1)
-frontend/src/App.svelte             # size/dimension/priority controls + Fovea-vs-standard comparison
+bench/                        # M0 harness: manifest.py records.py runners.py run.py cli.py judge_eval.py corpus/(no clips)
+tests/                        # 68 unit tests (no binaries) + test_integration_smoke.py (gated on ffmpeg/gifsicle)
+docs/                         # specs + this file + m2-judge.md
+backend/app/pipeline/fovea_gif.py   # *** the live integration bridge *** (fps floor, fit-rescue, dither-accurate fill)
+backend/app/pipeline/orchestrator.py# threads budget/dims/priority/mode + deadlines into the GIF path
+backend/app/source_cache.py         # upload-once source cache (source_id) — cuts per-edit latency
+backend/app/models.py               # OutputSpec.max_bytes/max_dim/priority/mode; StickerMeta.comparison/report
+backend/app/main.py                 # audit.* + SHA1; source_id ingest; SSE keepalive; per-job deadline
+frontend/src/App.svelte             # per-output size/dim/priority/mode + invisible + honesty line + comparison
 ```
 
 ---
@@ -183,34 +220,59 @@ means fewer colors. Concretely, the real test clip (IMG_7064, 180×320, 512KB):
 This is the format ceiling, not a bug. The product answer is to (a) always fill
 the budget and (b) let the user choose the frames-vs-color point.
 
-### 4.3 `_run_fovea` — 3 phases (the algorithm)
+### 4.3 `_run_fovea` — the algorithm (`cap`: phases; `invisible`: shrink-or-fall-back)
 For a given `priority` → a **color-richness floor** via `_color_floor_for`:
-`smooth→0`, `balanced→64`, `sharp→160`.
-1. **Encode all frames** at the richest palette the budget allows (one Fovea
-   `encode`). Often this already fills the budget (just at low colors).
-2. **Color-seeking trim** (skipped for `smooth`): drop frames ×0.72 per step until
-   the palette reaches the mode's floor (or 256, or `MIN_FRAMES=6`). Fewer frames
-   ⇒ a richer palette fits.
-3. **Frame-fill** (`_fill_frames_at_colors`): once a palette is chosen, **add
-   frames back at that fixed palette** until the byte budget is used (GIF size is
-   ~linear in frame count at fixed colors). **This is what stops us leaving budget
-   on the table** — the earlier bug was a one-directional trim that stalled at 79%.
+`smooth→0`, `balanced→64`, `sharp→160`. Also an **fps floor** so trimming can't make a
+slideshow: `min_n = clamp(round(min_fps × duration), MIN_FRAMES=6, total)`, where
+`min_fps` = `FOVEA_MIN_FPS_SHARP` (5) for sharp else `FOVEA_MIN_FPS` (8). Duration is
+preserved across subsampling, so frames ÷ duration == output fps.
 
-Observed spectrum on the real clip @ 512KB (all fill the budget):
+**`invisible` mode** asks the encoder for the smallest perceptually-lossless GIF under the
+cap (every frame kept). If the clip *can't* be made lossless under the ceiling it **falls
+through to `cap`** below — the encoder never trims frames, so a stuck low-palette
+invisible result is washed out and worse than the default (`fovea.invisible_fallback`).
+
+**`cap` mode — phases:**
+1. **Encode all frames** at the richest palette the budget allows (one Fovea `encode`).
+   Often this already fills the budget (just at low colors).
+2. **(a) Color-seeking trim** (balanced/sharp, skipped for `smooth`): drop frames ×0.72
+   per step toward the palette floor, **clamped at the fps floor** (`f = max(min_n, …)`)
+   so we never trim into a slideshow. **(b) Fit-rescue:** if even the fps-floor result
+   still overshoots the byte budget, keep trimming below the floor toward `MIN_FRAMES` —
+   fitting the hard cap is mandatory; the fps floor is only a preference.
+3. **Frame-fill** (`_fill_frames_at_colors`): add frames back at the chosen palette **and
+   the chosen candidate's dither** until the byte budget is used (GIF size is ~linear in
+   frame count at fixed colors+dither). Passing the *right* dither is what fixed a
+   budget-under-fill bug — frame-fill used to assume `sierra2_4a` while the cap often
+   picked `dither=none`, so the size estimate (and the stopping point) were wrong.
+
+Every phase respects the per-encode/per-job deadline (§7): when time's nearly up it keeps
+the best candidate so far instead of starting another encode. Log lines: `fovea.fill`
+(phases 1–2a), `fovea.fitrescue` (2b), `fovea.framefill` (3), `fovea.invisible*`.
+
+Observed spectrum on the real portrait clip (180×320) @ 512KB (all fill the budget):
 | mode | frames | colors | usage |
 |---|---|---|---|
 | smooth | 29/29 | 16 | 99% |
 | balanced | 14/29 | 112 | 97% |
 | sharp | 11/29 | 256 | 93% |
-(`sharp` caps at 93% only because 256 colors is the GIF max — nothing more to add.)
+(`sharp` caps at 93% only because 256 colors is the GIF max — nothing more to add.) On a
+*small* 512px-square clip at 512KB the case is resolution-bound, not budget-bound; the
+fps floor + fit-rescue + dither-accurate fill took sharp from **6f/2.1fps/80% to
+12f/5.2fps/95%**. The deeper fix (resolution as a bridge lever) is noted in §8.2.
 
-### 4.4 The comparison + the frame-alignment fix
+### 4.4 The comparison + single source of truth
 `gif_encode_compare` runs Fovea **and** legacy and returns a `comparison` dict
-(bytes/frames/colors/distance per side, `perceptually_lossless`). **Fairness fix:**
-each side's distance is measured against the **source subsampled to that side's
-own frame count** (`_aligned_distance`) — otherwise a frame-trimmed candidate was
-judged on misaligned frames and looked artificially worse. The baseline (legacy)
-GIF is served as a benign extra output keyed `gif__cmp` (excluded from the zip).
+(bytes/frames/colors/distance per side, `perceptually_lossless`). **Single source of
+truth:** the Fovea side's distance + lossless flag come straight from the encoder
+**report** — the same numbers the honesty line shows — so the side-by-side badge can never
+contradict it. Only the **legacy** baseline gets its own score, via `_aligned_distance`
+(it has no Fovea report). **Fairness fix (legacy side):** that distance is measured
+against the **source subsampled to the legacy GIF's own frame count** — otherwise a
+frame-trimmed candidate is judged on misaligned frames and looks artificially worse. The
+legacy encode is **cached** (`_legacy_*`, keyed on the fitted frames + size/colors/fps,
+TTL 900s) so changing only `priority` doesn't re-run it. The baseline GIF is served as a
+benign extra output keyed `gif__cmp` (excluded from the zip).
 
 ### 4.5 Audit trail + SHA1 chain (how we prove what shipped)
 `main.py` logs (structlog → JSON in Railway):
@@ -219,7 +281,9 @@ GIF is served as a benign extra output keyed `gif__cmp` (excluded from the zip).
 - `audit.gif.compare` (`fovea_sha1`, `legacy_sha1`, frames, colors, `primary=fovea`),
 - `audit.store` (each stored output: bytes, **sha1**, role),
 - `audit.serve` (every preview/download: key, bytes, **sha1**, download flag).
-`fovea_gif` logs `fovea.fill`/`fovea.framefill` per phase.
+`fovea_gif` logs `fovea.fill`/`fovea.fitrescue`/`fovea.framefill`/`fovea.invisible`/
+`fovea.invisible_fallback` per phase; `main.py` logs `source_cache.hit` when a regenerate
+reused an already-uploaded source (no re-upload).
 **Verification recipe:** the file a user downloads has the same SHA1 as
 `audit.serve key=gif download=true`, which equals `audit.gif.compare fovea_sha1`
 → proves the download is Fovea (not the legacy `legacy_sha1`). Users can confirm
@@ -230,17 +294,27 @@ locally: `shasum -a 1 file.gif | cut -c1-12`.
 ## 5. Frontend controls (`frontend/src/App.svelte`)
 Editor sidebar, per focused output:
 - **Max file size** (chips 256KB…8MB + a freeform `800KB`/`3.5MB` input). Binary
-  units. Defaults: sticker 512KB, emoji 256KB, gif 5MB.
+  units. Defaults: sticker 512KB, emoji 256KB, gif 5MB. Persist to `dsm_limits_v1`.
 - **Dimensions** (chips + custom px). Square side for sticker/emoji; longest edge
   for gif.
-- **Frames vs. color** (gif): More frames / Balanced / Richer color → `priority`
-  smooth/balanced/sharp (shared via `params.priority`).
-- Choices **persist** to localStorage (`dsm_limits_v1`).
+- **Frames vs. color** (gif + animated emoji): More frames / Balanced / Richer color →
+  `priority` smooth/balanced/sharp — now **per-output** (changing the GIF no longer moves
+  the sticker/emoji).
+- **Shrink until invisible** toggle (gif + emoji) → `mode` cap/invisible.
+- Per-output `priority`+`mode` **persist** to `dsm_outopts_v1` (separate from the
+  size/dimension `dsm_limits_v1`).
+- **Honesty line** under the focused output (`focusOut.meta.report`): the encoder verdict
+  — "stayed perceptually lossless" vs "visible loss worst around frame N" (+ stop reason /
+  invisible-shrink result), styled green when lossless.
 - **Fovea vs. standard** comparison card under the GIF: both animations, size /
   frames / colors / match%, per-side **Download Fovea / Download standard**, and a
-  verdict. The main "Download GIF (Fovea)" button is labeled.
-Plumbing: controls → `OutputSpec.max_bytes/max_dim/priority` → orchestrator
-(`budget`, `out_size`/`out_max_dim`, `_v(eff.priority)`) → bridge.
+  verdict. The match% + lossless flag come from the encoder report (§4.4). The main
+  "Download GIF (Fovea)" button is labeled.
+- **Latency:** the source uploads **once**; regenerates send a `source_id` (the source
+  cache, §0/§7) instead of re-posting the file, with a transparent re-upload if the
+  server's cache entry expired.
+Plumbing: controls → `OutputSpec.max_bytes/max_dim/priority/mode` → orchestrator
+(`budget`, `out_size`/`out_max_dim`, `_v(eff.priority)`, `_v(spec.mode)`) → bridge.
 
 ---
 
@@ -259,17 +333,29 @@ Plumbing: controls → `OutputSpec.max_bytes/max_dim/priority` → orchestrator
 
 ## 7. Known issues / gotchas
 - **Metric misjudges banding** (see 3.5) — the UI match% is not a reliable color
-  quality signal. M2 fixes this.
+  quality signal. M2 (foundation built, flag-gated — §0/§8.3) is the fix, but not the
+  default yet.
 - **Performance / no async worker yet (M4 not built):** encodes run synchronously
-  in the in-process `PIPELINE_EXECUTOR`. With the budget-fill + comparison +
-  3 outputs, a job can take **30–70s**. The client has a **120s SSE watchdog**.
-  Per-iteration cap: `FOVEA_BUDGET_SECONDS=12`, `FOVEA_MAX_ATTEMPTS=12`, ≤5 trims.
-  If jobs time out, the real fix is the §13.8 async split (M4).
+  in the in-process `PIPELINE_EXECUTOR`. With the budget-fill + comparison + 3 outputs a
+  job can take **30–70s**. Bounds now in place: a **global per-job deadline**
+  (`FOVEA_JOB_SECONDS=100`, under the 120s client watchdog) and a **per-output deadline**
+  (`FOVEA_OUTPUT_SECONDS=45`) both threaded through the bridge; per-encode
+  `FOVEA_BUDGET_SECONDS=12`, `FOVEA_MAX_ATTEMPTS=12`. The **SSE keepalive is 15s** so a
+  long encode no longer trips `ERR_CONNECTION_RESET`/`watchdog_timeout`. Per-edit latency
+  is cut by the **source cache** (upload once, then `source_id`) + the **legacy-baseline
+  cache** (don't re-run the standard encoder when only `priority` changed). The real fix
+  for scale is still the §8.5 async split (M4).
+- **Resolution-bound small clips:** at a *small* dimension (e.g. 512px square) a clip can
+  be limited by pixels, not bytes — the budget-fill + fps-floor get it to ~95%, but the
+  proper lever (drop resolution to buy frames/colors) isn't wired into the bridge yet
+  (§8.2).
 - **gifski is not installed in the image** (no apt package). ffmpeg + gifsicle
   are (apt; we disabled two broken PPAs — deadsnakes/ondrej — to install them).
   Fovea works on ffmpeg alone, so gifski is optional.
 - **Sticker = APNG = legacy encoder.** Fovea only touches GIF/emoji.
-- **`priority` is shared** across outputs (`params.priority`), not per-output yet.
+- **M2 `.onnx` is gitignored and not in the Docker image** — `FOVEA_METRIC=learned` only
+  does something where the model + onnxruntime are present (else it warns and falls back
+  to MS-SSIM). Wiring the artifact into the image is outstanding (§0/§8.3).
 - **Local dev:** numpy/Pillow/etc. live in `backend/.venv` (gitignored) and the
   Fovea root `.venv`; the *system* python has none of them.
 
@@ -315,27 +401,40 @@ benchmark (M0).
   table and we can state, per category, where Fovea wins/ties/loses at equal size.
 
 ### 8.2 Quick wins / polish (incremental, low-risk)
-- **Per-output `priority`:** today the frontend sends `priority: params.priority`
-  for all outputs, so changing the GIF's Frames-vs-color also moves the sticker.
-  Make it per-output state in `App.svelte` (the orchestrator already reads
-  `spec.priority or params.priority`, so backend is ready).
-- **Surface "invisible" mode in the UI:** `encoder.encode(mode="invisible")` finds
-  the smallest perceptually-lossless size and reports it, but the live app only
-  uses `cap`. Add a "shrink until invisible" option that returns + shows the
-  achieved size (spec's two operating modes).
-- **Surface honesty reporting:** `EncodeReport` has `loss_locus` (worst frame +
-  region hint), `stopped_early`, `stop_reason`, `warnings`. The UI shows only
-  `notes`. Show "stayed invisible vs traded, and where" prominently.
+**Shipped this session (§0):**
+- ✅ **Per-output `priority` + `mode`** in `App.svelte` (persisted `dsm_outopts_v1`); the
+  GIF's controls no longer move the sticker/emoji.
+- ✅ **Invisible mode in the UI** ("shrink until invisible"), wired through
+  `OutputSpec.mode`; falls back to cap when not losslessly possible.
+- ✅ **Honesty reporting surfaced** (`StickerMeta.report` → the UI honesty line).
+- ✅ **Warning on silent comparison fallback.**
+- ✅ **Global per-job deadline** (`FOVEA_JOB_SECONDS`) + **per-output deadline**
+  (`FOVEA_OUTPUT_SECONDS`) threaded through the bridge.
+
+**Still open:**
 - **gifski in the image (optional):** add via a pinned release binary or a
   `rust:` builder stage; enables the opaque video→GIF path. Fovea works without it.
-- **Tune defaults from data:** `_color_floor_for` (smooth=0/balanced=64/sharp=160)
-  and `FOVEA_BUDGET_USE` (0.93) were set by eye; recalibrate against the corpus.
-- **Anytime deadline through the bridge:** `_run_fovea`'s multi-encode loop has no
-  *global* wall-clock cap (only per-encode `FOVEA_BUDGET_SECONDS`). Thread a job
-  deadline through `gif_encode`/`gif_encode_compare` so a pathological clip can't
-  run for minutes (matters more after M4 metering).
+- **Tune defaults from data:** `_color_floor_for` (smooth=0/balanced=64/sharp=160),
+  `FOVEA_BUDGET_USE` (0.93), and the fps floors (`FOVEA_MIN_FPS` 8 / `_SHARP` 5) were set
+  by eye; recalibrate against the corpus (needs M0, §8.1).
+- **Resolution as a bridge lever:** for genuinely resolution-bound clips (small dims at a
+  generous byte cap — e.g. 512px square @ 512KB) the bridge can't currently spend the
+  budget on *pixels*. Add a controlled resolution step (the encoder already has
+  `SCALE_VALUES` as a last-resort lever) so the bridge can trade a little resolution for
+  frames/colors when frames×colors is maxed but bytes remain — the deeper fix behind the
+  95%-not-100% sharp case in §4.3.
 
 ### 8.3 M2 — learned, motion-aware perceptual metric (the quality unlock)
+**Status: foundation BUILT and flag-gated this session (§0; full writeup `docs/m2-judge.md`).**
+The `LearnedMetric` (`encoder/metrics/learned.py`), the training pipeline
+(`encoder/metrics/training/`), ONNX export, the flag-gated registry, and the acceptance
+harness (`fovea-bench judge-eval`) all exist; on held-out clips it scores **100% on the
+dithered-vs-banded case** where MS-SSIM is at chance. **What remains to make it the
+default:** (1) **human-preference validation** (the standing gate — no labelers this
+session), (2) wire the `.onnx` artifact into the Docker image (it's gitignored), and (3)
+once trusted, drop `_run_fovea`'s color-floor/budget-fill heuristic for metric-driven
+optimization. The rest of this section is the original design rationale, still valid.
+
 - **Why (the single most important scope):** MS-SSIM **cannot see banding** and
   rates a smooth-but-banded frame as *closer* than a dithered one (3.5). Because
   the judge is untrustworthy, we **cannot let `guided_search` optimize quality
@@ -472,16 +571,18 @@ the table current. Per spec §11, a lever or model ships only if it measurably b
 best baseline at equal size (or matches quality at smaller size) across the corpus.
 
 ### 8.8 Dependency graph / suggested order
-1. **M0 activation (§8.1)** — cheap; unlocks measurement; gates everything else.
-2. **Quick wins (§8.2)** — per-output priority, invisible mode, honesty surfacing,
-   gifski, the global deadline; ship incrementally.
-3. **M2 metric (§8.3)** — the quality unlock; **prerequisite** for trustworthy M3
-   RD decisions and for replacing the budget-fill heuristic.
+1. **M0 activation (§8.1)** — cheap; unlocks measurement; gates everything else. *(Still
+   open — the one cheap prerequisite that now blocks defaults tuning and the M2/M3 gates.)*
+2. **Quick wins (§8.2)** — ✅ mostly shipped (per-output priority+mode, invisible, honesty,
+   deadlines); still open: gifski, defaults tuning (needs M0), resolution-as-a-lever.
+3. **M2 metric (§8.3)** — ✅ foundation built + flag-gated; **remaining: human validation +
+   Docker wiring** before it's the default and we can drop the budget-fill heuristic.
 4. **M3 internals (§8.4)** — region-local palettes + perceptual frame reuse + joint
-   RD-LZW, then the Rust core. Needs M2 to judge tradeoffs honestly.
+   RD-LZW, then the Rust core. Needs M2 (trusted) to judge tradeoffs honestly.
 5. **M4 async split (§8.5)** — increasingly necessary as encode cost grows (M3) and
    for scale; can proceed in **parallel** (it's infra) whenever timeouts/scale
-   demand and the user provisions Redis + storage + a worker service.
+   demand and the user provisions Redis + storage + a worker service. *(The per-job /
+   per-output deadlines + source/legacy caches from §0 are interim mitigations.)*
 6. **M5 (§8.6)** — warm-start speedups + compliance hardening once internals exist.
 
 ---
@@ -492,7 +593,7 @@ best baseline at equal size (or matches quality at smaller size) across the corp
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"            # numpy, Pillow, PyYAML, pydantic, pytest
-pytest -q                          # 50 unit tests, no binaries needed
+pytest -q                          # 68 unit tests, no binaries needed
 # media tools (Debian/Ubuntu): apt-get install -y ffmpeg gifsicle   (gifski optional via cargo/release binary)
 # if apt update fails on PPAs: move /etc/apt/sources.list.d/*deadsnakes*,*ondrej* aside, then update
 ```
@@ -512,7 +613,10 @@ fovea-bench run         # results table (skips cleanly with no clips)
 **Env tunables (set on Railway, no code change)**
 `USE_FOVEA_GIF` (1), `FOVEA_AUTOBALANCE` (1), `FOVEA_COMPARE` (1),
 `FOVEA_BUDGET_USE` (0.93 — how full before stopping), `FOVEA_BUDGET_SECONDS` (12),
-`FOVEA_MAX_ATTEMPTS` (12). Color-floor per mode is hardcoded in
+`FOVEA_MAX_ATTEMPTS` (12), `FOVEA_MIN_FPS` (8), `FOVEA_MIN_FPS_SHARP` (5),
+`FOVEA_JOB_SECONDS` (100 — whole-job deadline), `FOVEA_OUTPUT_SECONDS` (45 — per-output
+deadline), `FOVEA_METRIC` (unset → MS-SSIM; `learned` opts into M2 *iff* the model +
+onnxruntime are present, else warns and falls back). Color-floor per mode is hardcoded in
 `fovea_gif._color_floor_for` (smooth=0/balanced=64/sharp=160).
 
 **Debugging a "looks wrong / wrong size" report:** ask for the `audit.*` log lines
@@ -535,6 +639,18 @@ was served/downloaded.
 6. "Still leaving 100KB; want smooth, don't trim" → root-caused the one-directional
    trim; added the **frame-fill** + the user's idea of a **Frames-vs-color setting**
    (smooth/balanced/sharp), all of which **fill the budget**.
+7. **This session — quick wins + the M2 foundation.** Shipped per-output priority+mode,
+   the invisible toggle, the honesty line, and the comparison-fallback warning; then built
+   the **M2 learned judge** end-to-end (flag-gated, beats MS-SSIM on the banding case) as
+   the path to eventually deleting the budget-fill heuristic.
+8. **This session — hardening from production logs.** Routed encoder logs to stdout (no
+   more phantom ERRORs); made invisible mode fall back to cap so it's never worse; added
+   an **fps floor + fit-rescue** (no 2-fps slideshows) and a **dither-accurate frame-fill**
+   (stopped leaving budget on the table); made the comparison badge read from the encoder
+   report (**single source of truth** — the user's "conflicting metrics" report); and cut
+   per-edit latency with a **source cache** (`source_id`) + **legacy-baseline cache**,
+   tightening the **SSE keepalive (15s)** + **per-output/per-job deadlines** to end the
+   connection-reset timeouts. 68 tests; PR #3.
 
 The throughline: the format forces a frames-vs-color tradeoff at a fixed size; we
 made it explicit and controllable and ensured the budget is always used — and the
@@ -542,19 +658,34 @@ honest ceiling on "automatic quality" is the placeholder metric, which M2 lifts.
 
 ---
 
-## 11. Commit reference (this session, newest first)
+## 11. Commit reference (newest first)
+
+**This session (branch `claude/inspiring-cray-wBFKB` → PR #3):**
 ```
-ff65d0b Frames-vs-color control for GIFs that always fills the byte budget
-9514723 Budget-fill: trim frames until the palette uses the byte budget
+1584a58 Bridge: fps floor (no slideshows), accurate budget-fill, single-source metrics
+61ca61a Keep SSE alive during long encodes; cap per-output encode time
+4f339cd Cut per-regenerate latency: cache the uploaded source and the comparison baseline
+b777067 Fix encoder log severity (stderr->stdout) and invisible-mode quality regression
+57004e2 Update STATE.md: record §8.2 quick wins + M2 learned-judge foundation
+d63cfa5 M2: learned perceptual judge (flag-gated) that fixes the banding blind spot
+1d32a73 Quick wins: per-output priority, invisible mode, honesty report, job deadline
+```
+
+**Earlier (handoff doc + the Fovea build/integration session, merged via PR #2):**
+```
+46d2d26 Expand STATE.md §8 into a detailed remaining-scopes build plan
+5d20618 Add living handoff doc (docs/STATE.md) + root README
+ff65d0b Add a Frames-vs-color control for GIFs that always fills the byte budget
+9514723 Budget-fill: trim frames until the palette actually uses the byte budget
 5ae0f53 Auto-balance GIF: hold a color floor, trim frames only as needed
-c22ee5b Denser color ladder so the size search climbs into the budget
-343c980 End-to-end audit logging with content hashes
+c22ee5b Denser color ladder so the size search climbs into the available budget
+343c980 Add end-to-end audit logging with content hashes
 5ec92f4 Use the byte budget for richer color; show frames/colors tradeoff
 40c5219 Make Fovea-vs-standard explicit on download; custom size input + persisted limits
-9137156 Size/dimension controls + Fovea-vs-standard comparison in the UI
+9137156 Add size/dimension controls and a Fovea-vs-standard comparison to the UI
 48bb9a4 Wire Fovea into the live GIF + emoji encode path (M4 stage 1)
 0b79669 Bundle gifsicle in the image; ignore Fovea build artifacts
-0ee4d71 Fovea test suite
-b2510be Fovea benchmark harness (M0)
-cedb0cd Fovea perceptually-lossless GIF encoder core (M1)
+0ee4d71 Add Fovea test suite
+b2510be Add Fovea benchmark harness (M0)
+cedb0cd Add Fovea perceptually-lossless GIF encoder core (M1)
 ```
