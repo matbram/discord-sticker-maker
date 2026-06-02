@@ -1,0 +1,46 @@
+# Synthetic benchmark corpus — committed-by-recipe, not by binary.
+#
+# These clips are GENERATED (deterministic) rather than committed:
+#     python bench/corpus/generate.py            # writes bench/corpus/synthetic/*.png
+# then measured at equal size across engines:
+#     fovea-bench run --manifest bench/corpus/synthetic.yaml \
+#                     --engines fovea-native,ffmpeg-palette
+#
+# Sources are APNG so the encoder sees full color (a GIF source would pre-quantize).
+# Use these to prove "better at equal size" locally; swap in real clips for truth.
+version: 1
+defaults:
+  target_sizes: ["128KB", "256KB", "512KB"]
+  max_fps: 50
+  fps: null
+clips:
+  - id: grad_pan
+    path: synthetic/grad_pan.png
+    category: motion_graphics
+    note: "smooth panning gradient; ~600k source colors — banding / keep-the-colors torture"
+    license: "synthetic (generated)"
+  - id: screen_scroll
+    path: synthetic/screen_scroll.png
+    category: screen_recording
+    note: "flat UI with a small scroll + cursor; mostly static (delta reuse)"
+    license: "synthetic (generated)"
+  - id: subject_move
+    path: synthetic/subject_move.png
+    category: video_clip
+    note: "static gradient bg + moving shaded subject; partial motion (the sweet spot)"
+    license: "synthetic (generated)"
+  - id: full_motion
+    path: synthetic/full_motion.png
+    category: video_clip
+    note: "plasma changing every pixel; hard case, little reuse"
+    license: "synthetic (generated)"
+  - id: logo_flat
+    path: synthetic/logo_flat.png
+    category: motion_graphics
+    note: "few flat colors, moving shapes; sharp edges / LZW"
+    license: "synthetic (generated)"
+  - id: sticker_alpha
+    path: synthetic/sticker_alpha.png
+    category: video_clip
+    note: "moving subject over a transparent background; exercises the alpha/full path"
+    license: "synthetic (generated)"

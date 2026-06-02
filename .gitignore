@@ -13,6 +13,11 @@ bench/out/
 bench/corpus/clips/
 bench/corpus/train_clips/
 bench/corpus/dataset/
+# synthetic corpus is generated, not committed: python bench/corpus/generate.py
+bench/corpus/synthetic/
+
+# rust native encoder build artifacts
+fovea-core/target/
 
 # node / frontend build
 frontend/node_modules/

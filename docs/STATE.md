@@ -1,10 +1,11 @@
 # Fovea — Project State & Handoff (living document)
 
 > **Read this first when resuming.** It is the canonical "where we are / how it
-> works / what's next." Last updated: the session that shipped the §8.2 quick wins,
-> the **M2 learned-judge foundation**, the production-log fixes, the per-edit
-> **latency** work, and the **fps-floor / budget-fill / single-source-metric** bridge
-> round — all on branch `claude/inspiring-cray-wBFKB` (**PR #3**). See §0.
+> works / what's next." Last updated: the session that built the **native Rust
+> encoder** (`fovea-core`) — per-frame local palettes + perceptual OKLab delta that
+> **dissolves the frames-vs-color "ceiling"** (§4.2/§4.3) — wired it behind the
+> Engine ABC, and **activated the M0 corpus** (synthetic generator). Branch
+> `claude/youthful-bell-Nr3rP`. See §0.
 > Companion docs: `docs/fovea-spec.md` (the why), `docs/architecture.md`,
 > `docs/metrics.md`, `docs/bench.md`, `docs/cli.md`, `docs/m2-judge.md` (the learned judge).
 
@@ -12,7 +13,53 @@
 
 ## 0. Recent updates (latest session)
 
-Branch **`claude/inspiring-cray-wBFKB`** → **PR #3** (pushing more commits updates that
+### Native Rust encoder + M0 corpus — branch `claude/youthful-bell-Nr3rP`
+
+The big one: a from-scratch **native encoder** that breaks the single-global-palette
+ceiling behind GIF washout. This is M3's core idea, built and shipped behind the
+existing abstractions (not a rewrite).
+
+**Why this matters.** The doc has called "(frames × colors)" a *format ceiling*
+(§4.2/§4.3). It is not — it was an artifact of the old pipeline forcing **one global
+≤256-color palette on every frame** (`engines.py` ffmpeg `palettegen`/`paletteuse`
+defaults), which is why all 29 frames collapsed to ~16 colors. GIF89a actually allows a
+**local color table per image block** (thousands of colors per file) and
+**transparency-based inter-frame delta** (unchanged pixels cost ~0 bytes). The native
+core uses both.
+
+**What landed.**
+- **`fovea-core/`** — Rust crate (`gif` + `imagequant` + an OKLab module), built as an
+  **abi3 `fovea_native` wheel** via maturin. Two correct modes, auto-selected:
+  *delta* (opaque clips: per-frame local palette + OKLab-ΔE transparency reuse under
+  `dispose=Keep`) and *full* (alpha matte: independent per-frame palettes). 8 `cargo`
+  tests + 5 pytest tests; GIL released during encode.
+- **`FoveaNativeEngine`** wired behind the existing `Engine` ABC and **preferred** by
+  `_select_engine`; the ffmpeg engines remain automatic fallbacks/baselines. Reuses
+  `guided_search`/the color ladder unchanged. **Dockerfile** gains a `rustbuild` stage;
+  runtime pip-installs the wheel (optional — import failure falls back to ffmpeg).
+- **M0 corpus activated** — `bench/corpus/generate.py` writes a deterministic synthetic
+  corpus as **APNG** (full-color sources) + `bench/corpus/synthetic.yaml`. `fovea-bench
+  run` works locally on it (no ffmpeg needed for the native engine).
+
+**Measured (synthetic corpus, native engine, ≤512KB, all frames kept, ~20fps):**
+| clip | mode | distinct colors | reuse | note |
+|---|---|---|---|---|
+| grad_pan (≈600k src colors) | delta | **6090** | 4.5% | full-motion gradient; **24× the 256 ceiling** |
+| subject_move (partial motion) | delta | **1688** | **87%** | the sweet spot: rich color + all frames + 75KB |
+| full_motion (hard case) | delta | 937 | 14% | near-lossless at 256KB |
+| sticker_alpha (transparent) | full | 104 | – | correct alpha path, perceptually perfect |
+
+**What's next (revised order).** Phase 2 — **trustworthy metric + rate-distortion
+search**: add an OKLab-ΔE banding term + validate/wire the M2 judge so the search can be
+trusted on color, then **retire the bridge's color-floor/frame-trim heuristic** (§0
+below) since per-frame palettes make "all frames + rich color" fit. Phase 3 (moonshot) —
+**region/multi-block palettes** for >256 colors in a single frame, and **delta-with-alpha**
+(erase via per-frame dispose) so stickers also get delta savings. Then head-to-head vs
+`ffmpeg-palette` on the corpus in Docker to publish the "better at equal size" table (§11).
+
+---
+
+### Prior session — branch `claude/inspiring-cray-wBFKB` → **PR #3** (pushing more commits updates that
 PR; do not open another). Full suite is **68 tests green**. Six threads landed:
 
 **Quick wins (§8.2) — shipped.** Per-output `priority` **and** `mode`: the GIF's
