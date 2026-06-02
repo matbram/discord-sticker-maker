@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "fovea-native"
-version = "0.1.0"
-description = "Fovea native GIF encoder (per-frame local palettes + perceptual OKLab delta)."
+version = "0.2.0"
+description = "Fovea native encoder (per-frame local palettes + perceptual OKLab delta + truecolor APNG)."
 requires-python = ">=3.11"
 classifiers = ["Programming Language :: Rust"]
 

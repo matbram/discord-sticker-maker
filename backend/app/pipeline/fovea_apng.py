@@ -28,13 +28,25 @@ import time
 
 log = logging.getLogger("fovea.apng")
 
+_warned_unavailable = False
+
 
 def _native_available() -> bool:
+    global _warned_unavailable
     try:
         import fovea_native  # noqa: F401
 
-        return hasattr(fovea_native, "encode_apng")
+        ok = hasattr(fovea_native, "encode_apng")
+        if not ok and not _warned_unavailable:
+            _warned_unavailable = True
+            log.warning("fovea.apng native encode_apng UNAVAILABLE (fovea_native=%s) — stickers "
+                        "fall back to the legacy palette. Likely a stale wheel: rebuild fovea-core.",
+                        getattr(fovea_native, "__version__", "?"))
+        return ok
     except Exception:  # noqa: BLE001
+        if not _warned_unavailable:
+            _warned_unavailable = True
+            log.warning("fovea.apng fovea_native import failed — stickers use the legacy palette.")
         return False
 
 

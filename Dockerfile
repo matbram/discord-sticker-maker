@@ -44,7 +44,12 @@ RUN pip install -r requirements.txt
 # FoveaNativeEngine falls back to the ffmpeg engines if this import ever fails, so a
 # build hiccup here can never break the app.
 COPY --from=rustbuild /wheels /tmp/wheels
-RUN pip install /tmp/wheels/*.whl && rm -rf /tmp/wheels
+# --force-reinstall: never let a cached same-version wheel shadow a fresh build. Then verify
+# the freshly-built extension actually exposes the truecolor-APNG entrypoint the sticker path
+# depends on — fail the build loudly rather than silently shipping a stale wheel (which would
+# make every animated sticker fall back to the washed-out legacy palette).
+RUN pip install --force-reinstall --no-deps /tmp/wheels/*.whl && rm -rf /tmp/wheels \
+    && python -c "import fovea_native as f; assert hasattr(f, 'encode_apng'), 'stale fovea_native wheel: encode_apng missing'; print('fovea_native', f.__version__, 'encode_apng OK')"
 
 COPY backend/app ./app
 # Fovea encoder package (the backend GIF path imports `encoder`). Its deps
