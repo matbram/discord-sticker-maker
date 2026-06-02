@@ -34,6 +34,15 @@ def _v(x):
     return x.value if hasattr(x, "value") else x
 
 
+def _gif_dims(data: bytes) -> tuple[int, int] | None:
+    """Actual canvas W×H from a GIF's logical screen descriptor (little-endian u16 at
+    bytes 6–9). Fovea may descend resolution to fit the budget, so the encoded GIF can
+    be smaller than the pre-encode `fitted` frames — read the truth from the bytes."""
+    if len(data) >= 10 and data[:3] == b"GIF":
+        return (data[6] | (data[7] << 8), data[8] | (data[9] << 8))
+    return None
+
+
 def _sha1(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()[:12]
 
@@ -195,6 +204,14 @@ def process(source: Source, params, emit: EmitFn,
                         fitted, src_de, budget=budget, max_colors=eff.max_colors,
                         fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
                         mode=mode, deadline=out_deadline, notes=notes)
+
+        # Report the GIF's REAL dimensions: Fovea may have descended resolution to fit the
+        # budget (keeping the source aspect), so the encoded canvas can be smaller than the
+        # frames we handed it. The aspect ratio is preserved either way.
+        if fmt == "GIF":
+            actual = _gif_dims(data)
+            if actual:
+                w, h = actual
 
         animated = n_frames > 1
         if animated and n_frames < len(fitted):

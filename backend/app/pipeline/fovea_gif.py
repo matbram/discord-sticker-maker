@@ -310,7 +310,13 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
             for sc in (0.85, 0.72, 0.6, 0.5):
                 if deadline is not None and (deadline - time.monotonic()) < 1.5:
                     break
-                nw, nh = max(16, round(w0 * sc)), max(16, round(h0 * sc))
+                # Scale the longest side by `sc` and derive the other from the source
+                # ratio, so the aspect ratio is held exactly (no rounding drift) at every
+                # resolution the descent visits — "Source" keeps the source's shape.
+                if w0 >= h0:
+                    nw = max(16, round(w0 * sc)); nh = max(16, round(nw * h0 / w0))
+                else:
+                    nh = max(16, round(h0 * sc)); nw = max(16, round(nh * w0 / h0))
                 rf = [_np.asarray(_Image.fromarray(fr).resize((nw, nh), _Image.LANCZOS)) for fr in bf]
                 d2, fp2, c2, rep2 = _encode_once(rf, bd, budget, secs(), attempts, mode="cap")
                 log.info("fovea.native_scale mode=%s frames=%d dim=%dx%d colors=%s bytes=%d dist=%s",
@@ -438,9 +444,9 @@ def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, priority="
             if notes is not None:
                 notes.append(_fovea_note(len(fitted), n, colors))
                 if isinstance(report, dict) and report.get("scaled_dim"):
-                    notes.append(f"Reduced to {report['scaled_dim']} so all {n} frames could keep "
-                                 f"rich color within the size limit (raise the limit or pick "
-                                 f"“More frames” to hold the full dimensions).")
+                    notes.append(f"Scaled down (keeping your source aspect ratio) so all {n} frames "
+                                 f"could hold rich color within the size limit — raise the limit or "
+                                 f"pick “More frames” to keep the full resolution.")
                 if mode == "invisible":
                     kb = len(data) // 1024
                     if report.get("mode") == "invisible":          # true smallest-lossless result
