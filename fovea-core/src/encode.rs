@@ -491,22 +491,30 @@ pub fn encode_search(
         return Ok(search_out(ladder[full_idx], full_eo, target));
     }
 
-    // ---- Stage 2: delta bisection from full_idx upward (climbs to richer color). ----
-    let (mut lo, mut hi) = (full_idx as i32, ladder.len() as i32 - 1);
-    let mut delta_best: Option<(usize, EncodeOut)> = None;
+    // ---- Stage 2: does delta meaningfully help? Probe it once at the chosen colors. ----
+    // On full-motion clips (little reuse) delta ~= full but is *sequential* (no per-frame
+    // parallelism, so slow), so we must NOT do a whole delta bisection there. We climb
+    // only when one probe shows real reuse; otherwise the parallel full result stands.
+    let d0 = encode_delta_out(frames, delays_cs, &opts_at(ladder[full_idx], sopts.delta_threshold))?;
+    let d0_fits = d0.gif.len() as u64 <= target;
+    let d0_helps = d0_fits && (d0.gif.len() as u64) * 100 < (full_eo.gif.len() as u64) * 88;
+    if !d0_helps {
+        let chosen = if d0_fits && d0.gif.len() < full_eo.gif.len() { d0 } else { full_eo };
+        return Ok(search_out(ladder[full_idx], chosen, target));
+    }
+
+    // Reuse is real -> climb delta from full_idx upward (delta encodes are cheap here).
+    let (mut lo, mut hi) = (full_idx as i32 + 1, ladder.len() as i32 - 1);
+    let mut delta_best: (usize, EncodeOut) = (full_idx, d0);
     while lo <= hi {
         let mid = ((lo + hi) / 2) as usize;
         let eo = encode_delta_out(frames, delays_cs, &opts_at(ladder[mid], sopts.delta_threshold))?;
         if eo.gif.len() as u64 <= target {
-            delta_best = Some((mid, eo));
+            delta_best = (mid, eo);
             lo = mid as i32 + 1;
         } else {
             hi = mid as i32 - 1;
         }
     }
-
-    Ok(match delta_best {
-        Some((idx, eo)) => search_out(ladder[idx], eo, target),
-        None => search_out(ladder[full_idx], full_eo, target), // delta didn't beat full; keep the safe fit
-    })
+    Ok(search_out(ladder[delta_best.0], delta_best.1, target))
 }

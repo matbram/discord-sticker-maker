@@ -123,6 +123,31 @@ Verified end-to-end on a dark/partial-motion 512px clip: **9s cap / 13s invisibl
 20 colors, 51 frames, 410×230). New Rust tests:
 `search_always_fits_the_target_and_keeps_all_frames`, `search_returns_smallest_when_nothing_fits`.
 
+### Frames-vs-color restored on the native path — hard clips (same branch)
+
+The next live test (a John Wick clip — full-frame *camera motion*, so little reuse) exposed
+the over-correction in Phase 2: I'd made `priority` a no-op on the native path, reasoning
+per-frame palettes make "all frames + rich color" always fit. **They don't on full-motion
+clips** — 72 frames at 512×288 in 512KB is ~7KB/frame, so the encoder bottomed out at **2
+colors (washout, 8.2% match)** while the user's "Richer color" button did nothing. The
+frames-vs-color tradeoff is *physics*, not a bandaid: with no reuse, the only way to add
+color is fewer frames (what the standard encoder does at 18f). Fixes:
+
+- **`_run_fovea` honors `priority` on the native path again**: "more frames" keeps them all;
+  "balanced"/"richer color" trim frames (down to the fps floor) so the per-frame palette
+  climbs. The native search self-fits at each count, so no fit-rescue/frame-fill. On *easy*
+  clips the first encode already meets the floor → no trim (all frames + rich color kept).
+- **`encode_search` delta-climb-skip** (speed): on low-reuse clips the sequential delta
+  bisection was redoing full-cost work (~27s). Now one delta probe at the chosen colors
+  decides; the climb runs only when reuse is real (and then delta encodes are cheap). Keeps
+  the parallel full-mode result otherwise.
+
+Verified on a realistic hard clip (smooth scene + camera pan): **richer color → 20f / 16
+colors / 479KB / dist 0.031** (recognizable) vs **more frames → 72f / 2 colors / dist 0.53**
+(washed, by choice). ~17–27s, within the per-output deadline. *Open follow-up:* lowering
+the dither level on hard clips would let even more colors fit (better LZW); and `priority`
+deserves UX/label review now that it genuinely trades frames for color again.
+
 ---
 
 ### Prior session — branch `claude/inspiring-cray-wBFKB` → **PR #3** (pushing more commits updates that

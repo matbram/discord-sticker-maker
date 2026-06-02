@@ -5,10 +5,11 @@ The orchestrator's GIF outputs (gif + emoji) route through here. We run Fovea's
 legacy ffmpeg path as an automatic fallback.
 
 When the **native engine** is built (`FoveaNativeEngine`), per-frame local palettes
-give rich color with *every* frame kept, so we trust the metric-driven encode and the
-frames-vs-color ``priority`` dance below is skipped (priority is effectively a no-op on
-that path — the tradeoff it managed no longer exists). The split below applies to the
-**legacy ffmpeg fallback**, whose single global palette still forces the tradeoff:
+give rich color with *every* frame on easy clips, so it just trusts the metric-driven
+encode. On HARD clips (full-frame motion) even per-frame palettes can only fit a few
+colors across 72 frames, so the frames-vs-color ``priority`` still applies — it trims
+frames so the per-frame palette gets richer. The **legacy ffmpeg fallback** keeps the
+same priority split (its single global palette forces the tradeoff on every clip):
 
   * smooth   — frames first: keep every frame; color is whatever fits.
   * balanced — most frames whose palette still fills the budget, then top off
@@ -222,17 +223,42 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
     attempts = int(os.getenv("FOVEA_MAX_ATTEMPTS", "12"))
 
     # NATIVE PATH: the in-Rust byte-target search keeps every frame and guarantees a
-    # <= budget result (it lowers the per-frame color budget, then resolution only if
-    # truly forced) and shrinks for invisible mode internally. So we trust it: ONE
-    # encode, no frames-vs-color dance, no fit-rescue. `priority` is a no-op here — the
-    # tradeoff it managed no longer exists. The legacy ffmpeg path below keeps the dance.
+    # <= budget result (lowering the per-frame color budget, then resolution only if
+    # forced), shrinking for invisible mode internally. On easy clips (screen recordings,
+    # partial motion) that already yields rich color with every frame. But on HARD clips
+    # (full-frame motion — little reuse) 72 frames may only fit ~2 colors -> washout. So
+    # we still honor the frames-vs-color `priority`: "more frames" keeps them all;
+    # "balanced"/"richer color" trim frames so the per-frame palette gets richer (the only
+    # lever left on full-motion content), never below the fps floor. No fit-rescue or
+    # frame-fill needed — the search self-fits and self-maximizes color at each count.
     if _native_available():
-        secs = max(1.0, _seconds_left(deadline, per_encode * 2))
-        data, fps, colors, report = _encode_once(fitted, delays, budget, secs, attempts, mode=mode)
-        log.info("fovea.native mode=%s frames=%d colors=%s bytes=%d usage=%.2f under=%s",
-                 mode, total, colors, len(data), (len(data) / budget) if budget else 1.0,
-                 report.get("under_target"))
-        return data, total, fps, colors, report
+        secs = lambda: max(1.0, _seconds_left(deadline, per_encode))  # noqa: E731
+        data, fps, colors, report = _encode_once(fitted, delays, budget, secs(), attempts, mode=mode)
+        chosen = (data, total, fps, colors, report)
+        log.info("fovea.native mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
+                 mode, total, colors, len(data), (len(data) / budget) if budget else 1.0)
+
+        floor = _color_floor_for(priority)
+        if mode != "invisible" and floor and (colors or 0) < floor:
+            duration_s = (sum(delays) / 1000.0) if delays and any(delays) else (total / 10.0)
+            min_fps = float(os.getenv("FOVEA_MIN_FPS_SHARP", "5") if priority == "sharp"
+                            else os.getenv("FOVEA_MIN_FPS", "8"))
+            min_n = (max(MIN_FRAMES, min(total, int(round(min_fps * duration_s))))
+                     if duration_s > 0 else MIN_FRAMES)
+            f = total
+            while f > min_n:
+                if deadline is not None and (deadline - time.monotonic()) < 1.5:
+                    break  # out of time — keep the richest candidate so far
+                f = max(min_n, int(f * 0.6))
+                wf, wd = even_subsample(list(fitted), list(delays), f)
+                d, fp, c, rep = _encode_once(wf, wd, budget, secs(), attempts, mode="cap")
+                log.info("fovea.native_trim mode=%s frames=%d colors=%s bytes=%d",
+                         priority, f, c, len(d))
+                if (c or 0) > (chosen[3] or 0):   # fewer frames bought richer color -> take it
+                    chosen = (d, f, fp, c, rep)
+                if f <= min_n or (c or 0) >= floor:
+                    break
+        return chosen
 
     # ---- LEGACY ffmpeg fallback: invisible handling + the 3-phase frames-vs-color dance.
     # Invisible: smallest perceptually-lossless GIF; if a clip can't be made lossless under
