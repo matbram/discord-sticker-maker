@@ -125,10 +125,12 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
                 lo = mid
         data, used = best
 
-    # 3) Perceptual gate: keep the truecolor APNG only if it stayed perceptually close. The
-    #    temporal lever is near-lossless for static/handheld content (it removes grain + small
-    #    motion the eye doesn't track), but pathological full-frame motion would need visible
-    #    temporal blur to fit — hand those back to the sharp legacy palette path instead.
+    # 3) Score the truecolor candidate. We DON'T hard-reject on a fixed threshold anymore —
+    #    keeping all frames + full color is almost always better than the legacy palette path
+    #    (which drops ~half the frames and quantizes to ~32 colors). Instead we return the
+    #    candidate + its distance and let the orchestrator ship whichever *actually* scores
+    #    better. We only bail (None -> legacy) if the truecolor is genuinely too soft to be
+    #    worth comparing (a pathological full-frame-motion clip past the sanity cap).
     dist = None
     try:
         from encoder.core.frames import frames_from_list
@@ -141,16 +143,22 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
             frames_from_list(frs, dl[: len(frs)])).distance
     except Exception:  # noqa: BLE001 - report is best-effort
         pass
-    accept = float(os.getenv("FOVEA_APNG_ACCEPT", "0.045"))
-    if dist is not None and dist > accept:
-        return None  # would be visibly soft — the palette path looks better here
+    # <= accept: all-frames full-color truecolor is clearly better than frame-dropped palette,
+    # ship it now (skip the costly legacy compare). Between accept and sanity: borderline, let
+    # the orchestrator compare to legacy. > sanity: too soft even for all-frames truecolor.
+    accept = float(os.getenv("FOVEA_APNG_ACCEPT", "0.06"))
+    sanity = float(os.getenv("FOVEA_APNG_SANITY", "0.18"))
+    if dist is not None and dist > sanity:
+        return None
+    fast_accept = dist is None or dist <= accept
 
     report = {"mode": "temporal", "format": "apng", "strength": round(used, 3),
+              "fast_accept": fast_accept,
               "perceptual_distance": (round(dist, 6) if dist is not None else None),
               "perceptually_lossless": (bool(dist <= 0.02) if dist is not None else None)}
     kb = len(data) // 1024
-    log.info("fovea.apng frames=%d dim=%dx%d strength=%.2f bytes=%d dist=%s",
-             n, w, h, used, len(data), dist)
+    log.info("fovea.apng frames=%d dim=%dx%d strength=%.2f bytes=%d dist=%s fast_accept=%s",
+             n, w, h, used, len(data), dist, fast_accept)
     if notes is not None:
         if used <= 0.0:
             notes.append(f"APNG: full color, all {n} frames, losslessly ({kb} KB).")
@@ -160,3 +168,26 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
         else:
             notes.append(f"APNG: all {n} frames at full color, temporally smoothed to fit {kb} KB.")
     return data, "APNG", n, fps, report
+
+
+def apng_distance(fitted, delays, data) -> float | None:
+    """Perceptual distance of an encoded animation (`data`, any PIL-decodable animated
+    format incl. APNG) vs the source ``fitted`` frames — used to compare the truecolor APNG
+    against the legacy palette result and keep whichever looks better. None if it can't score."""
+    try:
+        import numpy as np
+
+        from encoder.core.frames import frames_from_list
+        from encoder.metrics import default_metric
+
+        n = len(fitted)
+        dl = list(delays) if (delays and any(delays)) else [40] * n
+        frs = _decode_apng_frames(data)
+        if not frs:
+            return None
+        m = default_metric()
+        return m.distance(
+            frames_from_list([np.ascontiguousarray(f) for f in fitted], dl),
+            frames_from_list(frs, dl[: len(frs)])).distance
+    except Exception:  # noqa: BLE001
+        return None

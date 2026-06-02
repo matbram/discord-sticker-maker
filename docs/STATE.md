@@ -50,20 +50,23 @@ re-sent every frame). Diagnosed via prototypes: a grainy cut-out at strength-1 s
     freeze keeps erasures ~0 for static/handheld subjects so OVER carries almost every frame.
   - Spatial denoise + YCoCg chroma reduction remain as a last-resort high-strength tail.
 - **`backend/app/pipeline/fovea_apng.py`** `apng_encode`: try lossless (strength 0); else bisect
-  the **temporal** strength up to a cap (~0.85) for the lowest that fits; then a **perceptual
-  gate** — keep the truecolor APNG only if color-aware distance ≤ `FOVEA_APNG_ACCEPT` (0.045).
-  Only pathological full-frame motion (where fitting needs visible temporal blur) returns
-  ``None`` → orchestrator uses the legacy sharp shared-palette path. Honesty report via
-  `default_metric()`.
+  the **temporal** strength up to a cap (~0.85) for the lowest that fits (this naturally **fills
+  the budget** — lower strength = bigger + more faithful). **No fixed reject gate**: keeping all
+  frames + full color almost always beats the frame-dropped 32-colour legacy path, so we ship
+  truecolor when it's clearly lossless (dist ≤ `FOVEA_APNG_ACCEPT`=0.06, fast path) and for
+  borderline clips the **orchestrator encodes the legacy candidate too and keeps whichever
+  actually scores lower** (`apng_distance`). Only past a sanity cap (0.18) do we bail to legacy.
 - **`fovea-core/src/python.rs`** `encode_apng` binding (added `temporal` arg); **`orchestrator.py`**
-  sticker branch routes to `apng_encode`. Serving treats APNG as `image/png`; checklist accepts APNG.
-- **Measured (320×320×29f, 512KB, all frames, full color):** static cut-out portrait → **436 KB,
-  25 fps, dist 0.014 (lossless)**; handheld bob → **205 KB, 25 fps, dist 0.033**; opaque
-  non-cut-out static-bg portrait → 422 KB (29f) / 427 KB (48f), 30 fps, dist 0.018; extreme
-  continuous full-frame motion → gate→legacy (honest). 5 cargo + 78 pytest green; PIL-composited
-  round-trip confirms OVER/SOURCE compositing is correct (no ghosting).
-- **Next:** global motion compensation via the APNG fcTL frame offset (cancel camera bob/pan so
-  even handheld clips with large translation stay all-frames truecolor); running-sum box blur.
+  sticker branch routes to `apng_encode`, then does the truecolor-vs-legacy compare. Serving
+  treats APNG as `image/png`; checklist accepts APNG.
+- **Measured (320×320×29f, 512KB, all frames, full color):** static cut-out portrait → 436 KB,
+  25 fps, dist 0.014 (lossless); handheld bob → 205 KB, dist 0.033; **handheld full-frame
+  (camera shake + moving subject + grain, opaque) → 508 KB (99% of budget), all 29 frames,
+  25 fps, dist 0.048** (was falling to 13–15-frame/32-colour legacy); opaque static-bg portrait
+  → 422 KB (29f)/427 KB (48f), 30 fps. 5 cargo + 78 pytest green; PIL round-trip confirms
+  OVER/SOURCE compositing (no ghosting).
+- **Next:** foveated/ROI bit-allocation (spend bytes on the subject, smooth periphery) + zopfli
+  final deflate to push the hardest handheld clips from dist ~0.05 toward truly lossless.
 
 
 ### Animated output is a Format choice: GIF (largest perceptually-lossless) | WebP (source res) — branch `claude/youthful-bell-Nr3rP`

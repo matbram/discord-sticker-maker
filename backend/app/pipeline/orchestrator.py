@@ -151,14 +151,28 @@ def process(source: Source, params, emit: EmitFn,
                 fitted = crop_fit.fit_square(fr, eff, has_alpha, out_size)
                 w = h = out_size
                 if is_anim and prof["animated_format"] == "APNG":
-                    # Truecolor APNG (full color, every frame) via the native perceptual
-                    # encoder. It returns None for dense full-frame content truecolor can't
-                    # hold cleanly — then we use the legacy sharp shared-palette path (never a
-                    # blurred result). Also None if the native ext isn't built.
+                    # Truecolor APNG (full color, EVERY frame) via the native perceptual
+                    # encoder (temporal stabilization). Keeping all frames + full color almost
+                    # always beats the legacy palette path (which drops ~half the frames and
+                    # quantizes to ~32 colors), so we ship truecolor whenever it's clearly
+                    # lossless, and for borderline clips we encode the legacy candidate too and
+                    # keep whichever *actually* scores better. None => can't fit / native missing.
                     res_apng = fovea_apng.apng_encode(
                         fitted, de, budget=budget, deadline=out_deadline, notes=notes)
                     if res_apng is not None:
                         data, fmt, n_frames, fps, report = res_apng
+                        if not report.get("fast_accept", False):
+                            # Borderline truecolor: compare against legacy, keep the better one.
+                            try:
+                                ld, lf, ln, lfps = encode.encode_animated(fitted, de, eff)
+                                tdist = report.get("perceptual_distance")
+                                ldist = fovea_apng.apng_distance(fitted, de, ld)
+                                if (tdist is not None and ldist is not None and ldist < tdist):
+                                    # Legacy genuinely looks better here (rare) — use it.
+                                    data, fmt, n_frames, fps, report = ld, lf, ln, lfps, None
+                                    notes[:] = [nt for nt in notes if not nt.startswith("APNG:")]
+                            except Exception:  # noqa: BLE001 - comparison is best-effort
+                                pass
                     else:
                         data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
                         if not params.remove_bg:
