@@ -34,11 +34,13 @@ now keeps **full color + every frame**, manufacturing the needed compression *pe
     and YCoCg **chroma reduction**. A single `strength` knob (radius + edge-override + chroma)
     scales both; grain is incompressible noise the eye doesn't track, so removing it shrinks
     the deflated truecolor dramatically and invisibly.
-- **`backend/app/pipeline/fovea_apng.py`** (new) `apng_encode`: a **metric-guided search** —
-  try lossless (strength 0); else bisect strength for the lowest that fits the budget; else a
-  bounded extra blur; else (only pathological full-frame motion) trim frames to honor the hard
-  512KB cap. Honesty report via `default_metric()`. Falls back to legacy `encode_animated` if
-  the native ext is unavailable.
+- **`backend/app/pipeline/fovea_apng.py`** (new) `apng_encode`: try lossless (strength 0); else
+  bisect strength up to a cap (~0.85, still grain-removal not mush) for the lowest that fits;
+  then a **perceptual gate** — keep the truecolor APNG only if the color-aware distance is low
+  (cut-out / clean / static-bg). For dense full-frame motion where fitting truecolor would mean
+  visibly **blurring** real detail, return ``None`` so the orchestrator uses the **legacy sharp
+  shared-palette** path (never a blurred/frame-dropped result — an early bail keeps it fast).
+  Honesty report via `default_metric()`; ``FOVEA_APNG_ACCEPT`` tunes the gate.
 - **`fovea-core/src/python.rs`** `encode_apng` PyO3 binding; **`orchestrator.py`** sticker
   branch routes to `apng_encode`. Serving already treats APNG as `image/png` (valid); the
   checklist already accepts APNG.

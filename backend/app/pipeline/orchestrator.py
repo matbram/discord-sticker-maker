@@ -152,13 +152,18 @@ def process(source: Source, params, emit: EmitFn,
                 w = h = out_size
                 if is_anim and prof["animated_format"] == "APNG":
                     # Truecolor APNG (full color, every frame) via the native perceptual
-                    # encoder; falls back to the legacy shared-palette path if unavailable.
+                    # encoder. It returns None for dense full-frame content truecolor can't
+                    # hold cleanly — then we use the legacy sharp shared-palette path (never a
+                    # blurred result). Also None if the native ext isn't built.
                     res_apng = fovea_apng.apng_encode(
                         fitted, de, budget=budget, deadline=out_deadline, notes=notes)
                     if res_apng is not None:
                         data, fmt, n_frames, fps, report = res_apng
                     else:
                         data, fmt, n_frames, fps = encode.encode_animated(fitted, de, eff)
+                        if not params.remove_bg:
+                            notes.append("Tip: turn on “Cut out background” — a cut-out subject "
+                                         "encodes as full-color truecolor with every frame.")
                 elif is_anim and prof["animated_format"] == "GIF":
                     # Square emoji: its dimensions are fixed (Discord requires 128×128), so the
                     # encoder must NOT trade resolution for color here.

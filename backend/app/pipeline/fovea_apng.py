@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import time
 
 log = logging.getLogger("fovea.apng")
@@ -73,97 +74,80 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
     import fovea_native
     from encoder.core.timing import effective_fps
 
-    from .encode import even_subsample
-
     n = len(fitted)
     h, w = fitted[0].shape[:2]
     dl = list(delays) if (delays and any(delays)) else [40] * n
     base = [np.ascontiguousarray(fr) for fr in fitted]
     fps = effective_fps(dl) or 10.0
+    dcs = [max(1, int(round(d / 10.0))) for d in dl]  # ms -> centiseconds
 
     def tight() -> bool:
         return deadline is not None and (deadline - time.monotonic()) < 1.0
 
-    def enc(frames, dl_ms, strength: float) -> bytes:
+    def enc(strength: float) -> bytes:
         den, ch, dt = _strength_params(strength)
-        dcs = [max(1, int(round(d / 10.0))) for d in dl_ms]  # ms -> centiseconds
-        res = fovea_native.encode_apng(
-            [f.tobytes() for f in frames], w, h, dcs, delta_threshold=dt, alpha_threshold=24,
-            loop_count=0, compression=4, denoise=den, chroma_step=ch)
-        return res["png"]
+        return fovea_native.encode_apng(
+            [f.tobytes() for f in base], w, h, dcs, delta_threshold=dt, alpha_threshold=24,
+            loop_count=0, compression=4, denoise=den, chroma_step=ch)["png"]
 
-    out_frames, out_dl = base, dl
-
-    # 1) Lossless attempt (no transforms). Clean / static / cut-out stickers fit here.
-    data = enc(base, dl, 0.0)
+    # 1) Lossless attempt (no transforms). Cut-out / clean / static-bg stickers fit here.
+    data = enc(0.0)
     used = 0.0
     if len(data) > budget:
-        # 2) Bisect strength for the *lowest* (highest-fidelity) value that fits the budget —
-        #    edge-aware denoise + chroma reduction spend only imperceptible entropy.
-        lo, hi, best = 0.0, 1.0, None
-        for _ in range(7):
+        # 2) `CAP` is the most denoise we'll accept before it stops being grain-removal and
+        #    starts blurring real detail. If even CAP won't fit, this is dense full-frame
+        #    content truecolor can't hold cleanly -> bail fast to the legacy palette path
+        #    (one extra encode, no slow climb into mush).
+        cap = 0.85
+        top = enc(cap)
+        if len(top) > budget:
+            return None
+        # Bisect (0, CAP] for the lowest (highest-fidelity) strength that fits.
+        lo, hi, best = 0.0, cap, (top, cap)
+        for _ in range(6):
             if tight():
                 break
             mid = (lo + hi) / 2.0
-            d = enc(base, dl, mid)
+            d = enc(mid)
             if len(d) <= budget:
                 best = (d, mid)
                 hi = mid
             else:
                 lo = mid
-        if best is not None:
-            data, used = best
-        else:
-            # 3) A bounded amount of extra (now visible) blur for very dense clips.
-            for s in (1.4, 2.0):
-                if tight():
-                    break
-                data, used = enc(base, dl, s), s
-                if len(data) <= budget:
-                    break
-            # 4) Last resort for pathological full-frame motion that no perceptual transform
-            #    can fit at full frame count: trim frames to honor the hard byte cap (Discord
-            #    rejects >512KB). Real stickers never reach here; this guarantees a valid file.
-            fcount = n
-            while len(data) > budget and fcount > 8 and not tight():
-                fcount = max(8, int(fcount * 0.7))
-                out_frames, out_dl = even_subsample(base, dl, fcount)
-                data = enc(out_frames, out_dl, used)
+        data, used = best
 
-    n_out = len(out_frames)
-    fps = effective_fps(out_dl) or fps
-
-    # Honesty report: perceptual distance of the APNG vs the (kept) source frames.
-    report = {"mode": "cap", "format": "apng", "strength": round(used, 3)}
+    # 3) Perceptual gate: keep the truecolor APNG ONLY if it's genuinely clean. For dense
+    #    full-frame motion, fitting truecolor would require visibly blurring real detail
+    #    (mush) — the legacy shared-palette path stays sharp and uses the budget, so hand
+    #    back to it instead of shipping a blurred result. (Cut-out stickers pass easily.)
+    dist = None
     try:
         from encoder.core.frames import frames_from_list
         from encoder.metrics import default_metric
 
         frs = _decode_apng_frames(data)
         m = default_metric()
-        res = m.distance(
-            frames_from_list([np.ascontiguousarray(f) for f in out_frames], out_dl),
-            frames_from_list(frs, out_dl[: len(frs)]))
-        report["perceptual_distance"] = round(res.distance, 6)
-        report["perceptually_lossless"] = bool(res.distance <= m.invisible_threshold)
+        dist = m.distance(
+            frames_from_list([np.ascontiguousarray(f) for f in base], dl),
+            frames_from_list(frs, dl[: len(frs)])).distance
     except Exception:  # noqa: BLE001 - report is best-effort
         pass
+    accept = float(os.getenv("FOVEA_APNG_ACCEPT", "0.045"))
+    if dist is not None and dist > accept:
+        return None  # would be visibly soft — the palette path looks better here
 
+    report = {"mode": "cap", "format": "apng", "strength": round(used, 3),
+              "perceptual_distance": (round(dist, 6) if dist is not None else None),
+              "perceptually_lossless": (bool(dist <= 0.02) if dist is not None else None)}
     kb = len(data) // 1024
-    lossless = report.get("perceptually_lossless", True)
-    log.info("fovea.apng frames=%d/%d dim=%dx%d strength=%.2f bytes=%d dist=%s",
-             n_out, n, w, h, used, len(data), report.get("perceptual_distance"))
+    log.info("fovea.apng frames=%d dim=%dx%d strength=%.2f bytes=%d dist=%s",
+             n, w, h, used, len(data), dist)
     if notes is not None:
-        if n_out < n:
-            notes.append(f"APNG: this clip is extremely detailed — kept full color but trimmed "
-                         f"to {n_out} of {n} frames to fit {kb} KB (raise the size limit to keep "
-                         f"every frame).")
-        elif used <= 0.0:
+        if used <= 0.0:
             notes.append(f"APNG: full color, all {n} frames, losslessly ({kb} KB).")
-        elif lossless:
-            notes.append(f"APNG: kept all {n} frames at full color (no sepia) — smoothed "
-                         f"imperceptible grain to fit {kb} KB.")
+        elif dist is not None and dist <= 0.02:
+            notes.append(f"APNG: all {n} frames at full color (no sepia) — removed imperceptible "
+                         f"grain to fit {kb} KB.")
         else:
-            notes.append(f"APNG: kept all {n} frames and full color; softened detail to fit "
-                         f"{kb} KB (raise the size limit for more sharpness).")
-    return data, "APNG", n_out, fps, report
+            notes.append(f"APNG: all {n} frames at full color, lightly smoothed to fit {kb} KB.")
+    return data, "APNG", n, fps, report
