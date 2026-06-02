@@ -45,6 +45,16 @@ _ready = {"bg": False}
 async def lifespan(app: FastAPI):
     obs.configure_logging()
     log.info("startup.begin", bg_available=bg_removal.available())
+    # Report exactly which native encoder is loaded, so a deploy's startup logs immediately
+    # show whether the truecolor-APNG sticker path is live (version 0.2.0+, encode_apng present)
+    # or a stale/old wheel is being served (then animated stickers fall back to the palette).
+    try:
+        import fovea_native
+
+        log.info("startup.native", fovea_native=getattr(fovea_native, "__version__", "?"),
+                 truecolor_apng=hasattr(fovea_native, "encode_apng"))
+    except Exception:  # noqa: BLE001
+        log.warning("startup.native fovea_native import FAILED — animated paths use ffmpeg/palette")
 
     def warm():
         bg_removal.warmup([bg_removal.DEFAULT_MODEL])
