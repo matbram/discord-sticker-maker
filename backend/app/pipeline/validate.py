@@ -35,10 +35,10 @@ def build_checklist_for(output_type: str, data: bytes, width: int, height: int,
             "PNG / GIF": fmt in ("PNG", "GIF"),
             "Transparent background": has_alpha,
         }
-    # gif — dimensions are user-chosen (source resolution or an explicit W×H), so there's
-    # no fixed size to assert; show the actual output dims and gate on format + byte limit.
+    # gif — the animated output (emitted as WebP, GIF fallback). Dimensions are user-chosen
+    # (source or explicit W×H), so show the actual size and gate on format + byte limit.
     return {
         f"{width}×{height} px": True,
         f"Under {_kb(profile['budget']) // 1024} MB": size <= profile["hard_limit"],
-        "GIF format": fmt == "GIF",
+        "Animated WebP / GIF": fmt in ("WEBP", "GIF"),
     }

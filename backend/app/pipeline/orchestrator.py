@@ -22,8 +22,6 @@ log = get_logger("orchestrator")
 
 EmitFn = Callable[..., None]
 MATTING_MAX_SIDE = 512   # matte at <=512 for memory/speed
-GIF_AUTO_MAX = 512       # "Auto" GIF: cap the longest side here, then the resolution-for-color
-                         #   descent picks the largest size that still holds rich color.
 # Working/cached frames are capped to this longest side — and it's the ceiling for a GIF's
 # "Source" dimensions, so it must be >= common source sizes (a 720x1280 phone clip needs
 # 1280, not the old 640 which halved it to 360x640). Env-tunable: raise for crisper
@@ -165,63 +163,39 @@ def process(source: Source, params, emit: EmitFn,
                     data, fmt = encode.encode_static(fitted[0], eff)
                     n_frames, fps = 1, None
             else:
-                # GIF dimensions (all keep the SOURCE aspect ratio):
-                #   * Custom W×H  -> exact dims; size is locked, color flexes to fit (no descent).
-                #   * Source      -> the source's own resolution; locked, color flexes (no descent).
-                #   * Auto (default) -> downscale within GIF_AUTO_MAX, then let the resolution-for-
-                #                       color descent pick the largest size that holds rich color.
-                #   * max_dim     -> back-compat longest-edge (treated like Auto: descent on).
+                # The animated "GIF" output is emitted as animated WebP: GIF/LZW can't hold
+                # color for a full-color clip at these pixel counts (0.157 bits/px => ~2 colors),
+                # but WebP's DCT + inter-frame prediction keep rich color at the SOURCE
+                # resolution and full frame rate within the same budget. Dimensions keep the
+                # source aspect ratio: Source (default) = the source's own size; Custom W×H =
+                # exact dims. WebP holds color at source res, so no resolution-for-color descent.
                 sh, sw = fr[0].shape[:2]
-                dim_mode = _v(spec.dim_mode)
                 if spec.width and spec.height:
-                    aw, ah, long_side, descend = spec.width, spec.height, max(spec.width, spec.height), False
-                elif dim_mode == "source":
-                    aw, ah, long_side, descend = sw, sh, max(sw, sh), False
-                elif spec.max_dim:
-                    aw, ah = resolve_aspect(spec.aspect, sw, sh)
-                    long_side, descend = spec.max_dim, True
-                else:
-                    aw, ah, long_side, descend = sw, sh, min(max(sw, sh), GIF_AUTO_MAX), True
+                    aw, ah, long_side = spec.width, spec.height, max(spec.width, spec.height)
+                elif spec.max_dim:                       # back-compat longest-edge
+                    aw, ah = resolve_aspect(spec.aspect, sw, sh); long_side = spec.max_dim
+                else:                                     # Source / Auto -> source resolution
+                    aw, ah, long_side = sw, sh, max(sw, sh)
                 fitted = crop_fit.fit_to_canvas(fr, eff, has_alpha, aw, ah, long_side)
                 h, w = fitted[0].shape[:2]
-                src_de = de if is_anim else [100]
-                if is_anim and mode == "cap" and fovea_gif.compare_enabled():
-                    try:
-                        (data, fmt, n_frames, fps,
-                         comparison, baseline_data, report) = fovea_gif.gif_encode_compare(
-                            fitted, src_de, budget=budget, max_colors=eff.max_colors,
-                            fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
-                            deadline=out_deadline, notes=notes, allow_descent=descend)
-                        comparison["baseline_output"] = f"{otype}__cmp"
-                        log.info(
-                            "audit.gif.compare", type=otype, primary="fovea",
-                            fovea_bytes=len(data), fovea_frames=n_frames,
-                            fovea_colors=comparison["fovea"].get("colors"), fovea_sha1=_sha1(data),
-                            legacy_bytes=len(baseline_data),
-                            legacy_frames=comparison["legacy"]["frames"],
-                            legacy_sha1=_sha1(baseline_data),
-                        )
-                    except Exception as exc:  # noqa: BLE001 - comparison is best-effort
-                        log.warning("fovea.compare_failed; serving Fovea only: %s", str(exc)[:200])
-                        notes.append("Side-by-side comparison unavailable; showing the Fovea result only.")
-                        comparison, baseline_data = None, None
-                        data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
-                            fitted, src_de, budget=budget, max_colors=eff.max_colors,
-                            fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
-                            mode=mode, deadline=out_deadline, notes=notes, allow_descent=descend)
+                if is_anim:
+                    data, fmt, n_frames, fps, report = fovea_gif.webp_encode(
+                        fitted, de, budget=budget, deadline=out_deadline, notes=notes)
                 else:
-                    data, fmt, n_frames, fps, report = fovea_gif.gif_encode(
-                        fitted, src_de, budget=budget, max_colors=eff.max_colors,
-                        fps_cap=prof.get("fps_cap", 24), priority=_v(eff.priority),
-                        mode=mode, deadline=out_deadline, notes=notes, allow_descent=descend)
+                    data, fmt = encode.encode_static(fitted[0], eff)
+                    n_frames, fps = 1, None
 
-        # Report the GIF's REAL dimensions: Fovea may have descended resolution to fit the
-        # budget (keeping the source aspect), so the encoded canvas can be smaller than the
-        # frames we handed it. The aspect ratio is preserved either way.
+        # Report the animated output's REAL dimensions (the encoder may shrink to fit the
+        # budget, keeping the source aspect): read GIF from its header, WebP from the report.
         if fmt == "GIF":
             actual = _gif_dims(data)
             if actual:
                 w, h = actual
+        elif fmt == "WEBP" and isinstance(report, dict) and report.get("scaled_dim"):
+            try:
+                w, h = (int(v) for v in report["scaled_dim"].split("x"))
+            except Exception:  # noqa: BLE001
+                pass
 
         animated = n_frames > 1
         if animated and n_frames < len(fitted):

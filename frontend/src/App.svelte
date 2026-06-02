@@ -56,12 +56,12 @@
   // Mirror of backend orchestrator WORK_MAX_SIDE: source frames are capped to this longest
   // side, so "Source" can't exceed it. Keep in sync with FOVEA_WORK_MAX_SIDE on the backend.
   const WORK_MAX_SIDE = 1280
-  // GIF sizing: mode 'auto' (encoder picks the size for the richest color, default),
-  // 'source' (lock the source resolution), or 'custom' (exact width×height). All keep the
-  // source aspect ratio. Sticker/emoji are square, so they keep a single side (`dim`).
+  // GIF sizing (emitted as animated WebP, which holds rich color at full resolution):
+  // 'source' keeps the source's own size (default); 'custom' uses an exact width×height.
+  // Both keep the source aspect ratio. Sticker/emoji are square, so they keep a side (`dim`).
   function defaultLimits() {
     return {
-      gif: { bytes: 5242880, mode: 'auto', width: null, height: null },
+      gif: { bytes: 5242880, mode: 'source', width: null, height: null },
       sticker: { bytes: 524288, dim: 320 },
       emoji: { bytes: 262144, dim: 128 }
     }
@@ -167,9 +167,10 @@
     const lim = (t) => {
       if (t === 'gif') {
         const g = limits.gif
-        if (g.mode === 'custom' && g.width && g.height) return { max_bytes: g.bytes, width: g.width, height: g.height }
-        if (g.mode === 'source') return { max_bytes: g.bytes, dim_mode: 'source' }
-        return { max_bytes: g.bytes }   // auto: encoder picks the size for best color
+        // Custom -> exact W×H; otherwise (Source, default) send only the budget -> source res.
+        return (g.mode === 'custom' && g.width && g.height)
+          ? { max_bytes: g.bytes, width: g.width, height: g.height }
+          : { max_bytes: g.bytes }
       }
       return { max_bytes: limits[t].bytes, max_dim: limits[t].dim }
     }
@@ -314,7 +315,7 @@
   $: userOutputs = outputs.filter((o) => !String(o.type).includes('__cmp'))
 
   $: fr = framing[focusedType] || framing.gif
-  $: gifMode = limits.gif?.mode || 'auto'
+  $: gifMode = limits.gif?.mode || 'source'
   $: gifCustom = gifMode === 'custom' && !!(limits.gif?.width && limits.gif?.height)
   $: gifAR = gifAspect(gifCustom ? limits.gif.width : null, gifCustom ? limits.gif.height : null, sourceW, sourceH)
   $: focusAspect = focusedType === 'gif' ? gifAR : [1, 1]
@@ -481,8 +482,7 @@
           {#if focusedType === 'gif'}
             <div class="ctl"><span class="ctl-label">Dimensions</span>
               <div class="chips">
-                <button class="chip" class:on={gifMode === 'auto'} on:click={() => setGifMode('auto')}>Auto</button>
-                <button class="chip" class:on={gifMode === 'source'} on:click={() => setGifMode('source')}>Source</button>
+                <button class="chip" class:on={gifMode !== 'custom'} on:click={() => setGifMode('source')}>Source</button>
                 <button class="chip" class:on={gifMode === 'custom'} on:click={() => setGifMode('custom')}>Custom W×H</button>
               </div>
               {#if gifMode === 'custom'}
@@ -493,11 +493,9 @@
                   <input class="custom-in wh" type="number" min="16" max="1024" placeholder="height"
                          value={limits.gif.height ?? ''} on:change={setGifH} />
                 </div>
-                <span class="muted-line">Locks {limits.gif.width}×{limits.gif.height} px — color drops to fit the file size (raise the limit if it looks washed).</span>
-              {:else if gifMode === 'source'}
-                <span class="muted-line">Locks the source size{srcCap[0] ? ` (${srcCap[0]}×${srcCap[1]})` : ''} — color drops to fit the file size (raise the limit, or use Auto, if it looks washed).</span>
+                <span class="muted-line">Exactly {limits.gif.width}×{limits.gif.height} px, full color (animated WebP).</span>
               {:else}
-                <span class="muted-line">Best color for your file size — the encoder picks the size (keeps your aspect ratio).</span>
+                <span class="muted-line">Your source size{srcCap[0] ? ` (${srcCap[0]}×${srcCap[1]})` : ''}, full color &amp; frame rate — encoded as animated WebP (plays in Discord like a GIF).</span>
               {/if}
             </div>
           {:else}

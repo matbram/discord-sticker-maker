@@ -205,8 +205,8 @@ async def events(job_id: str):
 def _serve(out: dict, download: bool, name: str, *, job_id: str | None = None,
            key: str | None = None) -> Response:
     fmt = out["fmt"]
-    media = "image/gif" if fmt == "GIF" else "image/png"
-    ext = "gif" if fmt == "GIF" else "png"
+    media = {"GIF": "image/gif", "WEBP": "image/webp"}.get(fmt, "image/png")
+    ext = {"GIF": "gif", "WEBP": "webp"}.get(fmt, "png")
     headers = {"Cache-Control": "no-store"}
     if download:
         headers["Content-Disposition"] = f'attachment; filename="{name}.{ext}"'
@@ -238,7 +238,7 @@ async def result_typed(job_id: str, output: str, download: bool = False):
                 if "__cmp" in t:  # comparison baseline is served on demand, not bundled
                     continue
                 o = job.outputs[t]
-                ext = "gif" if o["fmt"] == "GIF" else "png"
+                ext = {"GIF": "gif", "WEBP": "webp"}.get(o["fmt"], "png")
                 z.writestr(f"discord-{t}.{ext}", o["bytes"])
         return Response(content=buf.getvalue(), media_type="application/zip",
                         headers={"Content-Disposition": 'attachment; filename="discord-media.zip"', "Cache-Control": "no-store"})

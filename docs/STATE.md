@@ -16,6 +16,33 @@
 
 ## 0. Recent updates (latest session)
 
+### The animated "GIF" output is now animated WebP — breaks the format ceiling — branch `claude/youthful-bell-Nr3rP`
+
+**The real ceiling was GIF itself.** A full-color 720×1280 × 29-frame clip in 512 KB is
+**0.157 bits/pixel**. GIF/LZW has no DCT, no inter-frame prediction, and only ~2:1 entropy
+coding on photographic content → ~2 palette colors. No palette/dither/descent trick escapes
+that; it's a 1987 format. Measured on the user's exact clip: GIF = 2 colors / ΔE **0.383**
+(washed); **animated WebP (VP8) = full color / ΔE 0.0052 — perceptually lossless — at the
+SAME 720×1280, all 29 frames, 483 KB.** WebP spends the identical bits on real photographic
+detail + inter-frame deltas. Discord renders animated WebP inline (autoplays/loops like a GIF).
+
+- **`fovea_gif.webp_encode`**: animated WebP at the frames' own resolution, ALL frames kept,
+  **quality bisected** to the byte budget (with a graceful resolution fallback only if even
+  q=1 overflows). Emits an honesty report (perceptual distance, lossless flag). Source
+  720×1280 × 29f: lossless at 512 KB *and* 256 KB.
+- **Orchestrator**: the animated `gif` output now calls `webp_encode` (fmt `WEBP`). Dimensions
+  keep the source aspect: **Source (default)** = the source's own resolution (WebP holds rich
+  color there, so no resolution-for-color descent), **Custom W×H** = exact. The frames-vs-color
+  trims and the GIF resolution descent are no longer needed for this output. Sticker stays
+  APNG; emoji stays GIF (Discord requires those).
+- **Serving** (`main.py`): `image/webp` + `.webp` for `WEBP` (single + ZIP). **`validate.py`**
+  gif checklist accepts WebP. **Frontend**: Dimensions = Source | Custom W×H (default Source);
+  the `<img>` preview animates WebP natively.
+- The earlier GIF machinery (per-frame palettes, resolution-for-color descent, frame trims)
+  remains for the emoji GIF + as a fallback, but the lossless-color win now comes from the
+  format, not heuristics.
+
+
 ### GIF dimensions: Auto (default) / Source / Custom W×H — branch `claude/youthful-bell-Nr3rP`
 
 The GIF dimension model was confusing: a single number (`max_dim`) meant the **longest

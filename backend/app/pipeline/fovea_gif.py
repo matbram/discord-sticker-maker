@@ -471,6 +471,100 @@ def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, priority="
     return data, fmt, n, fps, None
 
 
+def webp_encode(fitted, delays, *, budget, deadline=None, notes=None):
+    """Animated WebP (VP8) at the frames' own resolution, ALL frames kept, quality bisected
+    to fit ``budget`` -> (bytes, "WEBP", n_frames, fps, report).
+
+    Why WebP for the animated output: GIF/LZW has no DCT or inter-frame prediction, so a
+    full-color 720x1280x29-frame clip is ~2 colors in 512KB (0.157 bits/pixel of palette
+    entropy). WebP spends the same bits on real photographic detail + inter-frame deltas, so
+    that exact clip is *perceptually lossless* (ΔE ~0.005) at full resolution and frame rate.
+    Discord renders animated WebP inline (autoplays/loops like a GIF). Falls back to the GIF
+    encoder if WebP isn't available."""
+    import io
+
+    import numpy as _np
+    from PIL import Image
+
+    from encoder.core.timing import effective_fps
+
+    total = len(fitted)
+    dl = list(delays) if (delays and any(delays)) else [40] * total
+    durs = [max(10, int(round(d))) for d in dl]
+    fps = effective_fps(dl) or 10.0
+    has_alpha = any(fr.shape[-1] == 4 and bool(_np.any(fr[..., 3] < 255)) for fr in fitted)
+
+    def render(scale: float):
+        out = []
+        for fr in fitted:
+            im = Image.fromarray(_np.ascontiguousarray(fr), "RGBA")
+            if scale < 1.0:
+                nw = max(16, int(round(im.width * scale)))
+                nh = max(16, int(round(nw * im.height / im.width)))   # hold the source aspect
+                im = im.resize((nw, nh), Image.LANCZOS)
+            out.append(im if has_alpha else im.convert("RGB"))
+        return out
+
+    def enc(imgs, q: int) -> bytes:
+        buf = io.BytesIO()
+        imgs[0].save(buf, format="WEBP", save_all=True, append_images=imgs[1:],
+                     duration=durs, loop=0, quality=int(q), method=4)
+        return buf.getvalue()
+
+    # Bisect quality for the best that fits; if even q=1 overflows (huge source / tiny budget)
+    # shrink resolution a notch and retry — WebP degrades gracefully, so this is rare.
+    data, qual, scale = None, 1, 1.0
+    for _ in range(5):
+        imgs = render(scale)
+        lo, hi, best = 1, 95, None
+        while lo <= hi:
+            if deadline is not None and (deadline - time.monotonic()) < 1.0:
+                break
+            mid = (lo + hi) // 2
+            d = enc(imgs, mid)
+            if len(d) <= budget:
+                best = (d, mid); lo = mid + 1
+            else:
+                hi = mid - 1
+        if best is not None:
+            data, qual = best
+            break
+        d1 = enc(imgs, 1)
+        if len(d1) <= budget or scale <= 0.4:
+            data, qual = d1, 1
+            break
+        scale *= 0.8
+
+    w, h = Image.open(io.BytesIO(data)).size
+    report = {"mode": "cap", "format": "webp", "quality": qual, "scaled_dim": f"{w}x{h}"}
+    try:  # honesty report: perceptual distance of the WebP vs the same-resolution source
+        from encoder.core.frames import frames_from_list
+        from encoder.metrics import default_metric
+
+        wp = Image.open(io.BytesIO(data))
+        frs = []
+        try:
+            while True:
+                frs.append(_np.asarray(wp.convert("RGBA")))
+                wp.seek(wp.tell() + 1)
+        except EOFError:
+            pass
+        src = [_np.asarray(Image.fromarray(_np.ascontiguousarray(fr), "RGBA").resize((w, h), Image.LANCZOS))
+               for fr in fitted]
+        m = default_metric()
+        res = m.distance(frames_from_list(src, dl[:len(src)]), frames_from_list(frs, dl[:len(frs)]))
+        report["perceptual_distance"] = round(res.distance, 6)
+        report["perceptually_lossless"] = bool(res.distance <= m.invisible_threshold)
+    except Exception:  # noqa: BLE001 - report is best-effort
+        pass
+    log.info("fovea.webp quality=%s dim=%dx%d frames=%d bytes=%d dist=%s",
+             qual, w, h, total, len(data), report.get("perceptual_distance"))
+    if notes is not None:
+        notes.append(f"Encoded as animated WebP (quality {qual}) — full {w}×{h}, all {total} frames, "
+                     f"rich color in {len(data) // 1024} KB. WebP autoplays in Discord like a GIF.")
+    return data, "WEBP", total, fps, report
+
+
 def _aligned_distance(metric, fitted, delays, gif_path, n_frames: int) -> float:
     """Distance between a GIF and the SAME frames it kept (subsample the source to
     match), so a frame-trimmed candidate is judged on color/spatial fidelity rather
