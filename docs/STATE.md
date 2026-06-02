@@ -148,6 +148,31 @@ colors / 479KB / dist 0.031** (recognizable) vs **more frames → 72f / 2 colors
 the dither level on hard clips would let even more colors fit (better LZW); and `priority`
 deserves UX/label review now that it genuinely trades frames for color again.
 
+### Dithering OFF by default — the washout cause, inverted (same branch)
+
+A John Wick clip + an IMG_7064 portrait still came out washed (2–4 colors) at high frame
+counts. The cause was **dithering**, and the finding inverts the usual GIF wisdom:
+
+> In a byte-budgeted **per-frame-palette** encoder, dithering spends the budget on
+> incompressible LZW noise that **starves the palette → banding**. No-dither keeps flat
+> regions flat (great LZW) so the bytes buy **real palette colors**, which kill banding
+> *and* compress. "Always dither GIFs" assumes one fixed global palette; here it's wrong.
+
+Measured (smooth gradient, 512×288 @ 512KB, the original washout case):
+`dither 1.0 → 8 colors, band 0.037` vs `dither 0 → **224 colors**, band 0.005` — **28× more
+colors, 5× less banding**. On textured film it's a tie (grain is incompressible either way),
+and no-dither also fixes a byte-guarantee hole (dithered 2-color overshot 512KB at 72f
+while no-dither fit). So `FoveaNativeEngine` now defaults `dither="none"` (level 0);
+`FOVEA_NATIVE_DITHER` overrides. End-to-end the gradient now keeps **25 frames / 5332
+distinct colors** (was an 8-color blur).
+
+Plus the trim now **respects "≥24 frames" and stops at the LARGEST frame count that already
+looks great** (`perceptually_lossless` or ≥`GREAT_COLORS`=96/frame) instead of chasing max
+colors at the fewest frames (`FOVEA_RICH_MIN_FRAMES`=24). So John Wick's 25f/128-color
+*lossless* result is kept rather than trimmed to 20f. Python-only change (no Rust rebuild).
+*Caveat (physics):* genuine full-frame-motion at 512px/512KB is ~7–21 KB/frame — even
+no-dither can't make 24 frames colorful there; the honesty report says so.
+
 ---
 
 ### Prior session — branch `claude/inspiring-cray-wBFKB` → **PR #3** (pushing more commits updates that

@@ -294,6 +294,18 @@ def _native_dither(name: str | None) -> float:
     return {"none": 0.0, "bayer": 0.5}.get(name or "", 1.0)
 
 
+def _native_dither_level(name: str | None) -> float:
+    """Dither level for the native engine: from the lever ('none' -> 0, the default),
+    overridable via FOVEA_NATIVE_DITHER for experiments."""
+    env = os.getenv("FOVEA_NATIVE_DITHER")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    return _native_dither(name)
+
+
 def _rgba_frames(ctx: RenderContext) -> list[bytes]:
     """Decode the context's PNG frames to raw RGBA bytes, cached on the context so
     the search's many same-frame probes don't re-decode."""
@@ -331,7 +343,13 @@ class FoveaNativeEngine(Engine):
         return True
 
     def default_state(self) -> LeverState:
-        return LeverState(colors=256, dither="sierra2_4a")
+        # dither "none": in a byte-budgeted per-frame-palette encoder, dithering spends
+        # the budget on incompressible LZW noise that *starves* the palette (→ banding),
+        # so NO dithering fits far more real colors and bands LESS. Measured on a smooth
+        # gradient at 512px/512KB: dither→8 colors (band 0.037) vs none→224 colors
+        # (band 0.005). The "always dither GIFs" rule assumes one global palette; it's
+        # inverted here. (See STATE.md §0.)
+        return LeverState(colors=256, dither="none")
 
     def primary_values(self) -> tuple:
         # Same per-frame color ladder; "colors" is now a *per-frame* budget.
@@ -350,7 +368,7 @@ class FoveaNativeEngine(Engine):
 
         frames = _rgba_frames(ctx)
         colors = int(state.colors or 256)
-        dith = _native_dither(state.dither)
+        dith = _native_dither_level(state.dither)
         delta = float(os.getenv("FOVEA_DELTA_E", "0.02"))  # OKLab ΔE; ~1 JND
         speed = int(os.getenv("FOVEA_NATIVE_SPEED", "5"))
         res = fovea_native.encode(
@@ -367,7 +385,7 @@ class FoveaNativeEngine(Engine):
         return EngineOutput(out_path, len(res["gif"]), argv, self.name, state)
 
     def search_to_budget(
-        self, ctx: RenderContext, target_bytes: int, out_path: str, *, dither: str = "sierra2_4a",
+        self, ctx: RenderContext, target_bytes: int, out_path: str, *, dither: str = "none",
     ) -> EngineOutput:
         """Hit the byte target in ONE Rust call: bisect the per-frame color budget to
         the largest palette that fits, frames quantized in parallel. Always returns a
@@ -376,7 +394,7 @@ class FoveaNativeEngine(Engine):
         import fovea_native
 
         frames = _rgba_frames(ctx)
-        dith_level = _native_dither(dither)
+        dith_level = _native_dither_level(dither)
         delta = float(os.getenv("FOVEA_DELTA_E", "0.02"))
         speed = int(os.getenv("FOVEA_NATIVE_SPEED", "5"))
         res = fovea_native.search(

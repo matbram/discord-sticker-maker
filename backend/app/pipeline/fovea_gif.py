@@ -38,7 +38,8 @@ from collections import OrderedDict
 
 log = logging.getLogger("fovea.bridge")
 
-MIN_FRAMES = 6  # never trim a clip below this many frames
+MIN_FRAMES = 6      # absolute floor (fit-rescue may reach it); the user-facing rich floor is 24
+GREAT_COLORS = 96   # a per-frame palette this rich is banding-free -> stop trimming, keep the frames
 
 
 def _enabled() -> bool:
@@ -238,26 +239,36 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
         log.info("fovea.native mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
                  mode, total, colors, len(data), (len(data) / budget) if budget else 1.0)
 
-        floor = _color_floor_for(priority)
-        if mode != "invisible" and floor and (colors or 0) < floor:
+        def _great(c, rep):
+            # "great color" = the judge sees no visible loss, or the palette is already rich.
+            return bool(rep.get("perceptually_lossless")) or (c or 0) >= GREAT_COLORS
+
+        # "more frames" (smooth) keeps every frame. "balanced"/"richer color" trim toward
+        # richer color but NEVER below the >=24-frame floor the user asked for, and STOP at
+        # the LARGEST frame count that already looks great (lossless / richly colored) rather
+        # than chasing maximum colors at the fewest frames. With dithering off, far more
+        # colors fit per frame, so "great" is usually reached while keeping many frames.
+        if mode != "invisible" and _color_floor_for(priority) and not _great(colors, report):
             duration_s = (sum(delays) / 1000.0) if delays and any(delays) else (total / 10.0)
             min_fps = float(os.getenv("FOVEA_MIN_FPS_SHARP", "5") if priority == "sharp"
                             else os.getenv("FOVEA_MIN_FPS", "8"))
-            min_n = (max(MIN_FRAMES, min(total, int(round(min_fps * duration_s))))
-                     if duration_s > 0 else MIN_FRAMES)
+            rich_min = int(os.getenv("FOVEA_RICH_MIN_FRAMES", "24"))
+            fps_floor_n = int(round(min_fps * duration_s)) if duration_s > 0 else MIN_FRAMES
+            min_n = min(total, max(MIN_FRAMES, rich_min, fps_floor_n))
             f = total
             while f > min_n:
                 if deadline is not None and (deadline - time.monotonic()) < 1.5:
-                    break  # out of time — keep the richest candidate so far
+                    break  # out of time — keep the best candidate so far
                 f = max(min_n, int(f * 0.6))
                 wf, wd = even_subsample(list(fitted), list(delays), f)
                 d, fp, c, rep = _encode_once(wf, wd, budget, secs(), attempts, mode="cap")
-                log.info("fovea.native_trim mode=%s frames=%d colors=%s bytes=%d",
-                         priority, f, c, len(d))
-                if (c or 0) > (chosen[3] or 0):   # fewer frames bought richer color -> take it
-                    chosen = (d, f, fp, c, rep)
-                if f <= min_n or (c or 0) >= floor:
+                log.info("fovea.native_trim mode=%s frames=%d colors=%s bytes=%d lossless=%s",
+                         priority, f, c, len(d), rep.get("perceptually_lossless"))
+                if _great(c, rep):
+                    chosen = (d, f, fp, c, rep)   # largest frame count that looks great -> done
                     break
+                if (c or 0) > (chosen[3] or 0):
+                    chosen = (d, f, fp, c, rep)   # else keep the richest as a fallback
         return chosen
 
     # ---- LEGACY ffmpeg fallback: invisible handling + the 3-phase frames-vs-color dance.
