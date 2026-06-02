@@ -76,23 +76,37 @@ def _even(v: int) -> int:
     return max(2, v)
 
 
-def prepare_context(frames: Frames, scale: float, dest_dir: str) -> RenderContext:
-    """Write (optionally down-scaled) RGBA PNG frames to ``dest_dir`` -> context."""
+def prepare_context(frames: Frames, scale: float, dest_dir: str, *,
+                    native: bool = False) -> RenderContext:
+    """Write (optionally down-scaled) RGBA PNG frames to ``dest_dir`` -> context.
+
+    ``native=True`` is the fast path for :class:`FoveaNativeEngine`, which consumes raw
+    RGBA bytes directly: we resize in memory and stash the bytes on the context instead
+    of round-tripping every frame through a PNG on disk (that round-trip was costing
+    ~14s on a 72-frame clip — enough to starve the in-Rust search's time budget so it
+    couldn't descend resolution to fit). The ffmpeg engines still need PNGs on disk."""
     if scale >= 1.0:
         w, h = frames.width, frames.height
     else:
         w, h = _even(frames.width * scale), _even(frames.height * scale)
     paths: list[str] = []
+    rgba: list[bytes] | None = [] if native else None
     for i, arr in enumerate(frames.frames):
         im = Image.fromarray(arr, "RGBA")
         if (im.width, im.height) != (w, h):
             im = im.resize((w, h), Image.LANCZOS)
         p = os.path.join(dest_dir, f"f{i:05d}.png")
-        im.save(p, "PNG")
+        if native:
+            rgba.append(im.tobytes())   # consumed directly by the native engine — no PNG I/O
+        else:
+            im.save(p, "PNG")
         paths.append(p)
     delays_cs = ms_to_centiseconds(frames.delays_ms) if any(frames.delays_ms) else [10] * frames.n
     fps = effective_fps(frames.delays_ms) or 10.0
-    return RenderContext(dest_dir, paths, fps, delays_cs, w, h, scale)
+    ctx = RenderContext(dest_dir, paths, fps, delays_cs, w, h, scale)
+    if native:
+        ctx._fovea_rgba = rgba  # type: ignore[attr-defined]
+    return ctx
 
 
 # --------------------------------------------------------------------------- #
@@ -396,7 +410,13 @@ class FoveaNativeEngine(Engine):
         frames = _rgba_frames(ctx)
         dith_level = _native_dither_level(dither)
         delta = float(os.getenv("FOVEA_DELTA_E", "0.02"))
-        speed = int(os.getenv("FOVEA_NATIVE_SPEED", "5"))
+        # The byte-target search runs the color bisection many times over (and the bridge
+        # may re-run the whole search at several resolutions to chase color), so probe speed
+        # gates how far the resolution descent can climb within the deadline. imagequant
+        # speed 8 is ~40% faster than 5 with negligible quality loss (measured: identical
+        # colors/bytes on a 72-frame clip), so default the *search* hotter than a one-shot
+        # encode. Tunable via FOVEA_NATIVE_SEARCH_SPEED.
+        speed = int(os.getenv("FOVEA_NATIVE_SEARCH_SPEED", "8"))
         res = fovea_native.search(
             frames, ctx.width, ctx.height, list(ctx.delays_cs), int(max(1, target_bytes)),
             max_colors=256, min_colors=2, dithering=dith_level, delta_threshold=delta,

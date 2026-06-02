@@ -16,6 +16,47 @@
 
 ## 0. Recent updates (latest session)
 
+### Resolution-for-color: the third RD lever (fixes washout while keeping ≥24 frames) — branch `claude/youthful-bell-Nr3rP`
+
+**Symptom.** On detailed/grainy clips (a John Wick 512×288 movie clip; an IMG_7064
+288×512 portrait) "richer color" still shipped washout: 24 frames at 8–12 colors, and
+the John Wick clip logged **2 colors at every frame count** with bytes scaling linearly
+with frame count (252KB@72f … 83KB@20f) — only 16–48% of the 512KB budget used.
+
+**Root cause (diagnosed with the built wheel, not guessed).** The in-Rust color
+bisection is *correct* — on normal content it climbs colors as frames drop. The "2
+colors everywhere" is **genuine physics**: film grain / full-frame motion is
+incompressible at >2 colors, so even at 20 frames a full-res per-frame palette can't
+hold real color in 512KB. Pinning frames(≥24) + color + budget on a high-entropy clip
+**over-constrains** it. The only remaining lever is **pixels/frame**: downscaling
+averages out incompressible grain, so each per-frame palette suddenly fits far more real
+color. Measured (288×512 portrait, 24f, 512KB): full-res→6 colors / dist 0.047 (washed);
+207×369→20 colors / dist **0.019 (perceptually lossless)**; 144×256→256 colors. The
+washout→clean knee sits at color-aware distance ≈ 0.03.
+
+**What landed (`backend/app/pipeline/fovea_gif.py`, `encoder/core/{engines,encode}.py`).**
+- **Resolution-for-color descent** in `_run_fovea` (native path). When "richer
+  color"/"balanced" is still washed at the ≥24-frame floor, shrink resolution **keeping
+  the frames**, stopping at the *highest* resolution that's **no longer washed** — driven
+  by the color-aware perceptual distance (`GOOD_DIST`, default 0.03, env
+  `FOVEA_GOOD_DIST`) which *directly* measures banding, not a raw color count. Reports
+  `scaled_dim` so the honesty note explains the trade. Portrait: 4→**96 colors**, dist
+  0.40→0.04, all 24 frames. John Wick: 2→**12 colors**, all 72 frames.
+- **Fit-aware descent**: prefers under-budget candidates (then richest), so the hard
+  byte cap is never violated even when the initial encode overshoots (was a real
+  regression on pathological grain — now fits).
+- **Early-bail on frame-trim**: on grain-dominated clips trimming frames buys no color,
+  so a non-improving trim step bails immediately to the resolution lever (was burning the
+  whole deadline on dead-end full-res trims — the 71s "sharp" runs).
+- **PNG round-trip removed for the native path** (`prepare_context(native=True)`): the
+  engine consumes raw RGBA, so writing+reading a PNG per frame was pure waste — it cost
+  ~14s on a 72-frame clip, *starving the in-Rust search's time budget* so it couldn't
+  descend resolution to fit. Now in-memory.
+- **Search probe speed 8** (`FOVEA_NATIVE_SEARCH_SPEED`): ~40% faster than 5 with
+  negligible quality change, so the resolution descent completes within the deadline.
+- **Note:** "richer color" now trades **resolution** (not frames) for color on
+  full-motion content — the old "richer ⇒ fewer frames" mental model is retired.
+
 ### Native Rust encoder + M0 corpus — branch `claude/youthful-bell-Nr3rP`
 
 The big one: a from-scratch **native encoder** that breaks the single-global-palette

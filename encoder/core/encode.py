@@ -123,11 +123,13 @@ def encode(
     workdir = tempfile.mkdtemp(prefix="fovea_")
     contexts: dict[float, object] = {}
 
+    native = isinstance(engine, FoveaNativeEngine)
+
     def ctx_for(scale: float):
         if scale not in contexts:
             d = os.path.join(workdir, f"s{int(round(scale * 100))}")
             os.makedirs(d, exist_ok=True)
-            contexts[scale] = prepare_context(frames, scale, d)
+            contexts[scale] = prepare_context(frames, scale, d, native=native)
         return contexts[scale]
 
     def measure(scale: float, idx: int) -> Candidate:

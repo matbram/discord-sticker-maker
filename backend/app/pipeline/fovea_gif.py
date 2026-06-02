@@ -40,6 +40,12 @@ log = logging.getLogger("fovea.bridge")
 
 MIN_FRAMES = 6      # absolute floor (fit-rescue may reach it); the user-facing rich floor is 24
 GREAT_COLORS = 96   # a per-frame palette this rich is banding-free -> stop trimming, keep the frames
+# Color-aware perceptual distance at/below which the result is "no longer washed". The
+# metric's own perceptually-lossless threshold is ~0.02; the washout->clean knee sits just
+# above it (measured: 8 colors=0.037 still washed, 20 colors=0.019 clean), so ~0.03 stops
+# at the *highest* resolution whose per-frame palette is rich enough to kill banding.
+# Tunable without a logic redeploy via FOVEA_GOOD_DIST.
+GOOD_DIST = float(os.getenv("FOVEA_GOOD_DIST", "0.03"))
 
 
 def _enabled() -> bool:
@@ -224,14 +230,17 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
     attempts = int(os.getenv("FOVEA_MAX_ATTEMPTS", "12"))
 
     # NATIVE PATH: the in-Rust byte-target search keeps every frame and guarantees a
-    # <= budget result (lowering the per-frame color budget, then resolution only if
-    # forced), shrinking for invisible mode internally. On easy clips (screen recordings,
-    # partial motion) that already yields rich color with every frame. But on HARD clips
-    # (full-frame motion — little reuse) 72 frames may only fit ~2 colors -> washout. So
-    # we still honor the frames-vs-color `priority`: "more frames" keeps them all;
-    # "balanced"/"richer color" trim frames so the per-frame palette gets richer (the only
-    # lever left on full-motion content), never below the fps floor. No fit-rescue or
-    # frame-fill needed — the search self-fits and self-maximizes color at each count.
+    # <= budget result (lowering the per-frame color budget, then resolution if forced),
+    # shrinking for invisible mode internally. On easy clips (screen recordings, partial
+    # motion) that already yields rich color with every frame. But on HARD clips
+    # (full-frame motion / film grain — little reuse, incompressible) even per-frame
+    # palettes fit only ~2 colors at full res -> washout. So we honor `priority`: "more
+    # frames" keeps them all (color is whatever fits); "balanced"/"richer color" chase a
+    # clean (un-washed) palette with TWO levers, in order — (1) trim frames toward the
+    # >=24-frame floor (keeps resolution; best when a clip just has more frames than the
+    # budget can color), then (2) drop RESOLUTION keeping the frames (the decisive lever
+    # on grainy/full-motion content, where trimming buys no color). Each lever stops as
+    # soon as the result is no longer washed.
     if _native_available():
         secs = lambda: max(1.0, _seconds_left(deadline, per_encode))  # noqa: E731
         data, fps, colors, report = _encode_once(fitted, delays, budget, secs(), attempts, mode=mode)
@@ -239,16 +248,25 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
         log.info("fovea.native mode=%s frames=%d colors=%s bytes=%d usage=%.2f",
                  mode, total, colors, len(data), (len(data) / budget) if budget else 1.0)
 
-        def _great(c, rep):
-            # "great color" = the judge sees no visible loss, or the palette is already rich.
-            return bool(rep.get("perceptually_lossless")) or (c or 0) >= GREAT_COLORS
+        def _rich(c, rep):
+            # "no longer washed" = the judge sees no visible loss, the color-aware distance
+            # is at/below the washout->clean knee, or the palette is already objectively rich.
+            if bool(rep.get("perceptually_lossless")):
+                return True
+            d = rep.get("perceptual_distance")
+            if d is not None and d <= GOOD_DIST:
+                return True
+            return (c or 0) >= GREAT_COLORS
 
-        # "more frames" (smooth) keeps every frame. "balanced"/"richer color" trim toward
-        # richer color but NEVER below the >=24-frame floor the user asked for, and STOP at
-        # the LARGEST frame count that already looks great (lossless / richly colored) rather
-        # than chasing maximum colors at the fewest frames. With dithering off, far more
-        # colors fit per frame, so "great" is usually reached while keeping many frames.
-        if mode != "invisible" and _color_floor_for(priority) and not _great(colors, report):
+        # "more frames" (smooth) keeps every frame. "balanced"/"richer color" first try to win
+        # color by trimming frames toward (never below) the >=24-frame floor — this keeps full
+        # RESOLUTION, the better trade when a clip simply has more frames than the budget can
+        # color richly. We STOP at the LARGEST frame count that's no longer washed. But on
+        # full-motion / grainy content (the John Wick case) the per-frame entropy is so high
+        # that even few frames can't hold color at full res, so trimming buys nothing — we
+        # detect that (a trim step that fails to add color) and bail immediately to the
+        # resolution lever below instead of burning the whole deadline on dead-end trims.
+        if mode != "invisible" and _color_floor_for(priority) and not _rich(colors, report):
             duration_s = (sum(delays) / 1000.0) if delays and any(delays) else (total / 10.0)
             min_fps = float(os.getenv("FOVEA_MIN_FPS_SHARP", "5") if priority == "sharp"
                             else os.getenv("FOVEA_MIN_FPS", "8"))
@@ -256,6 +274,7 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
             fps_floor_n = int(round(min_fps * duration_s)) if duration_s > 0 else MIN_FRAMES
             min_n = min(total, max(MIN_FRAMES, rich_min, fps_floor_n))
             f = total
+            best_c = colors or 0
             while f > min_n:
                 if deadline is not None and (deadline - time.monotonic()) < 1.5:
                     break  # out of time — keep the best candidate so far
@@ -264,11 +283,52 @@ def _run_fovea(fitted, delays, budget: int, priority: str = "balanced", mode: st
                 d, fp, c, rep = _encode_once(wf, wd, budget, secs(), attempts, mode="cap")
                 log.info("fovea.native_trim mode=%s frames=%d colors=%s bytes=%d lossless=%s",
                          priority, f, c, len(d), rep.get("perceptually_lossless"))
-                if _great(c, rep):
-                    chosen = (d, f, fp, c, rep)   # largest frame count that looks great -> done
+                if _rich(c, rep):
+                    chosen = (d, f, fp, c, rep)   # largest frame count that's clean -> done
                     break
-                if (c or 0) > (chosen[3] or 0):
-                    chosen = (d, f, fp, c, rep)   # else keep the richest as a fallback
+                if (c or 0) > best_c:
+                    chosen = (d, f, fp, c, rep)   # improving -> keep the richest as a fallback
+                    best_c = c or 0
+                else:
+                    break  # trimming isn't buying color (grain-dominated) -> use resolution
+
+        # RESOLUTION-for-color (the decisive lever for detailed/grainy clips). If color is
+        # still washed at the >=24-frame floor, the user pinned frames + color + budget on a
+        # high-entropy clip — which over-constrains it — so the only thing left to give is
+        # pixels/frame. Downscaling also averages out incompressible grain, so each per-frame
+        # palette suddenly fits far more real color. Shrink ONLY until no longer washed (the
+        # highest such resolution), KEEPING the frames, and report the new size honestly.
+        data, n, fps, colors, report = chosen
+        if mode != "invisible" and priority != "smooth" and not _rich(colors, report):
+            import numpy as _np
+            from PIL import Image as _Image
+
+            bf, bd = (even_subsample(list(fitted), list(delays), n) if n < total
+                      else (list(fitted), list(delays)))
+            h0, w0 = bf[0].shape[:2]
+            best = chosen
+            for sc in (0.85, 0.72, 0.6, 0.5):
+                if deadline is not None and (deadline - time.monotonic()) < 1.5:
+                    break
+                nw, nh = max(16, round(w0 * sc)), max(16, round(h0 * sc))
+                rf = [_np.asarray(_Image.fromarray(fr).resize((nw, nh), _Image.LANCZOS)) for fr in bf]
+                d2, fp2, c2, rep2 = _encode_once(rf, bd, budget, secs(), attempts, mode="cap")
+                log.info("fovea.native_scale mode=%s frames=%d dim=%dx%d colors=%s bytes=%d dist=%s",
+                         priority, n, nw, nh, c2, len(d2), rep2.get("perceptual_distance"))
+                rep2 = {**rep2, "scaled_dim": f"{nw}x{nh}"}
+                # Prefer a candidate that FITS the budget over one that doesn't; among fitting
+                # ones the richest color (lower res buys color); among non-fitting ones the
+                # smallest (closest to fitting). Lower res tends to both fit and add color, so
+                # the descent walks toward "fits AND no longer washed" and never returns a
+                # larger-than-budget result when a fitting one was seen.
+                cf, best_fits = len(d2) <= budget, len(best[0]) <= budget
+                better = (cf and not best_fits) or (cf == best_fits and (
+                    (c2 or 0) > (best[3] or 0) if cf else len(d2) < len(best[0])))
+                if better:
+                    best = (d2, n, fp2, c2, rep2)
+                if cf and _rich(c2, rep2):
+                    break  # highest resolution that both fits and is no longer washed -> done
+            chosen = best
         return chosen
 
     # ---- LEGACY ffmpeg fallback: invisible handling + the 3-phase frames-vs-color dance.
@@ -377,6 +437,10 @@ def gif_encode(fitted, delays, *, budget, max_colors=256, fps_cap=24, priority="
                 fitted, delays, int(budget), priority, mode, deadline)
             if notes is not None:
                 notes.append(_fovea_note(len(fitted), n, colors))
+                if isinstance(report, dict) and report.get("scaled_dim"):
+                    notes.append(f"Reduced to {report['scaled_dim']} so all {n} frames could keep "
+                                 f"rich color within the size limit (raise the limit or pick "
+                                 f"“More frames” to hold the full dimensions).")
                 if mode == "invisible":
                     kb = len(data) // 1024
                     if report.get("mode") == "invisible":          # true smallest-lossless result
