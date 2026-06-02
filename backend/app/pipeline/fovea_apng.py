@@ -82,32 +82,43 @@ def _decode_apng_frames(data: bytes):
     return frames
 
 
-def _interframe_sad(frames):
-    """Mean absolute luma difference between consecutive frames — a cheap proxy for temporal
-    redundancy. Alpha-weighted so the transparent background (which the encoder skips anyway,
-    and whose stray RGB shifts under alignment) doesn't drown out the subject's signal."""
+def _subject_weight(frame, has_alpha):
+    """Per-pixel weight focusing motion estimation on the likely subject: the alpha matte for
+    a cut-out, else a center Gaussian (stickers crop the subject to the middle). In a close
+    handheld shot the near subject and far background move at different rates (parallax), so
+    weighting toward the dominant subject lets a single global shift actually stabilize it."""
     import numpy as np
 
-    lums = [(f[..., :3].astype(np.float32).mean(-1)) * (f[..., 3].astype(np.float32) / 255.0)
-            for f in frames]
-    if len(lums) < 2:
+    if has_alpha:
+        return frame[..., 3].astype(np.float32) / 255.0
+    h, w = frame.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    return np.exp(-((((xx - w / 2) / (0.42 * w)) ** 2) + (((yy - h / 2) / (0.42 * h)) ** 2)))
+
+
+def _interframe_sad(frames, has_alpha):
+    """Mean absolute luma difference between consecutive frames — a cheap proxy for temporal
+    redundancy. Each frame's luma is weighted by its own subject mask (see `_subject_weight`)
+    so background parallax / transparent fill doesn't drown out the signal we stabilized."""
+    import numpy as np
+
+    if len(frames) < 2:
         return 0.0
-    return float(np.mean([np.abs(lums[i] - lums[i - 1]).mean() for i in range(1, len(lums))]))
+    wl = [f[..., :3].astype(np.float32).mean(-1) * _subject_weight(f, has_alpha) for f in frames]
+    return float(np.mean([np.abs(wl[i] - wl[i - 1]).mean() for i in range(1, len(wl))]))
 
 
 def _global_motion_offsets(base, has_alpha):
     """Per-frame integer (dx,dy) that registers each frame to frame 0 (cancels camera shake).
-    Coarse-to-fine SAD on (alpha-masked) half-res luma; the dominant rigid content drives the
-    match, so local subject motion doesn't throw it off."""
+    Coarse-to-fine SAD on subject-weighted half-res luma; the dominant subject drives the match
+    so local motion / background parallax don't throw it off."""
     import numpy as np
 
     n = len(base)
 
     def feat(f):
         lum = f[..., :3].astype(np.float32) @ np.array([0.299, 0.587, 0.114], np.float32)
-        if has_alpha:
-            lum = lum * (f[..., 3].astype(np.float32) / 255.0)
-        return lum[::2, ::2]  # half-res for speed
+        return (lum * _subject_weight(f, has_alpha))[::2, ::2]  # subject-weighted, half-res
 
     ref = feat(base[0])
     h2, w2 = ref.shape
@@ -232,7 +243,7 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
         # Keep MC only if alignment genuinely made consecutive frames more similar (real camera
         # motion with dominant rigid content). The inter-frame SAD is a cheap, encode-free signal;
         # if it barely drops, the estimate was unreliable — revert so we never ship jittery output.
-        sad_ratio = (_interframe_sad(stab) / max(1e-6, _interframe_sad(base))) if mc_shift >= 2 else 1.0
+        sad_ratio = (_interframe_sad(stab, alpha_present) / max(1e-6, _interframe_sad(base, alpha_present))) if mc_shift >= 2 else 1.0
         if mc_shift >= 2 and sad_ratio < 0.7:
             frames_src = stab
             ref = stab
