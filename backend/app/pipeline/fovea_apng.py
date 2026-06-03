@@ -55,14 +55,21 @@ def _strength_params(s: float) -> tuple[float, float, int, float]:
 
     Temporal stabilization is the primary lever — it exploits frame-to-frame redundancy
     (static regions, grain, small motion) the way a video codec does, with no spatial
-    softening. The spatial tail (denoise/chroma) only engages near the top for pathological
-    full-frame motion. The search picks the *lowest* strength that fits, so fidelity is spent
-    only as needed."""
+    softening, and maxes out at s=1.0. Past that, the **soft tail** (s>0.85) keeps every frame
+    by spending the cheapest-looking entropy first — extra temporal reuse, then chroma
+    coarsening, then a *bounded* light blur (radius capped so it stays soft, never mush). The
+    search picks the *lowest* strength that fits, so fidelity is spent only as needed; a
+    distance ceiling in the caller falls back to the palette path before it could become mush."""
     c = max(0.0, min(1.0, s))
     temporal = c                                       # primary: temporal redundancy + matte freeze
-    denoise = max(0.0, (s - 0.85) / 0.15)              # spatial blur: off until 0.85 (last resort)
-    chroma_step = 1 + int(round(max(0.0, s - 0.9) * 70))  # 1..~8: only the very top coarsens chroma
-    delta_threshold = 0.022 + c * 0.018                # ~1..2 JND temporal reuse
+    over = max(0.0, s - 0.85)                           # the soft tail past pure temporal
+    # Spend the cheapest-looking entropy first. Temporal reuse (a higher delta threshold) reads
+    # as a touch of ghosting and the color-aware metric tolerates it far better than chroma
+    # banding or blur, so lean on it hardest; coarsen chroma only gently (banding is heavily
+    # penalized), and add a sliver of blur only at the very end.
+    delta_threshold = 0.022 + c * 0.018 + min(0.085, over * 0.16)   # up to ~0.12: heavy reuse
+    chroma_step = 1 + int(round(min(3.0, over * 6)))                # gentle color coarsening only
+    denoise = min(0.35, max(0.0, over - 0.35) * 1.2)               # a sliver of blur at the far end
     return temporal, denoise, chroma_step, delta_threshold
 
 
@@ -254,9 +261,11 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
         elif mc_shift >= 2:
             log.info("apng.mc skipped reason=no_gain max_shift=%d sad_ratio=%.2f", mc_shift, sad_ratio)
     if len(data) > budget:
-        # 3) Climb the temporal lever. `CAP` is the strongest stabilization we'll accept; if even
-        #    CAP won't fit, the clip is too motion-dense for lossless truecolor -> legacy palette.
-        cap = 0.85
+        # 3) Climb: temporal first (<=0.85), then the bounded soft tail (chroma + light blur) to
+        #    keep all frames. `CAP` is the softest we'll go; if even CAP won't fit, the clip is
+        #    too dense for truecolor at all -> legacy palette. The distance ceiling below is the
+        #    real "never mush" guard (this just bounds the search).
+        cap = 1.5
         top = enc(cap)
         if len(top) > budget:
             log.warning("apng.bail_legacy reason=over_budget_at_cap mc=%s cap_bytes=%d budget=%d",
@@ -296,18 +305,20 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
             frames_from_list(frs, dl[: len(frs)])).distance
     except Exception:  # noqa: BLE001 - report is best-effort
         log.warning("apng.score_failed", exc_info=True)
-    # <= accept: all-frames full-color truecolor is clearly better than frame-dropped palette,
-    # ship it now (skip the costly legacy compare). Between accept and sanity: borderline, let
-    # the orchestrator compare to legacy. > sanity: too soft even for all-frames truecolor.
+    # Per the user's choice, KEEP ALL FRAMES + FULL COLOR whenever the result isn't mush: ship
+    # the truecolor APNG as long as the perceptual distance is within `sanity` (the "soft but
+    # not mush" ceiling — well under the ~0.25 that read as mush). Only past that do we hand back
+    # to the frame-dropping palette path. `accept` just distinguishes lossless from softened for
+    # the user-facing note. Both env-tunable.
     accept = float(os.getenv("FOVEA_APNG_ACCEPT", "0.06"))
-    sanity = float(os.getenv("FOVEA_APNG_SANITY", "0.18"))
-    log.info("apng.score dist=%s accept=%.3f sanity=%.3f mc=%s", dist, accept, sanity, mc_applied)
+    sanity = float(os.getenv("FOVEA_APNG_SANITY", "0.16"))
+    log.info("apng.score dist=%s accept=%.3f sanity=%.3f mc=%s strength=%.2f", dist, accept, sanity, mc_applied, used)
     if dist is not None and dist > sanity:
-        log.warning("apng.bail_legacy reason=too_soft dist=%.4f > sanity=%.3f", dist, sanity)
+        log.warning("apng.bail_legacy reason=would_be_mush dist=%.4f > sanity=%.3f", dist, sanity)
         return None
-    # When MC stabilized the clip, the original-frame legacy comparison is unfair (it would
-    # penalize the stabilization shift), so ship the stabilized truecolor directly within sanity.
-    fast_accept = dist is None or dist <= accept or mc_applied
+    # Ship truecolor (all frames) — skip the legacy comparison, which the user has opted out of.
+    fast_accept = True
+    softened = dist is not None and dist > accept
 
     report = {"mode": ("motion+temporal" if mc_applied else "temporal"), "format": "apng",
               "strength": round(used, 3), "fast_accept": fast_accept, "motion_comp": mc_applied,
@@ -317,7 +328,10 @@ def apng_encode(fitted, delays, *, budget, deadline=None, notes=None):
     log.info("fovea.apng frames=%d dim=%dx%d strength=%.2f bytes=%d dist=%s fast_accept=%s mc=%s",
              n, w, h, used, len(data), dist, fast_accept, mc_applied)
     if notes is not None:
-        if mc_applied:
+        if softened:
+            notes.append(f"APNG: kept all {n} frames at full color, softened to fit {kb} KB "
+                         f"(no dropped frames, no sepia palette).")
+        elif mc_applied:
             notes.append(f"APNG: all {n} frames at full color — stabilized the camera shake so it "
                          f"fits {kb} KB without dropping frames or colors.")
         elif used <= 0.0:
